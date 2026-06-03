@@ -28,7 +28,7 @@ CUDA_DLL_DIRS = [
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 DEFAULT_CONFIG = {
     "config_version": CONFIG_VERSION,
@@ -43,7 +43,7 @@ DEFAULT_CONFIG = {
     "initial_prompt": "以下是简体中文普通话办公场景转写，可能包含 Unity、Editor、GPU、CPU、AI、Bug、微信、项目、功能、消息、发送、测试等术语。请保持中文为简体，英文术语保留英文。",
     "output_dir": "transcripts",
     "cache_dir": "cache",
-    "cache_retention_minutes": 10.0,
+    "cache_retention_minutes": 0.0,
     "sample_rate": 16000,
     "chunk_seconds": 0.5,
     "pre_roll_seconds": 1.5,
@@ -51,7 +51,7 @@ DEFAULT_CONFIG = {
     "max_phrase_seconds": 60.0,
     "transcribe_pause_seconds": 0.5,
     "silence_seconds": 5.0,
-    "input_gain": 8.0,
+    "input_gain": 1.0,
     "record_threshold": 0.01,
     "transcribe_threshold": 0.015,
     "rms_threshold": 0.01,
@@ -162,6 +162,12 @@ def migrate_config(user_config: dict) -> dict:
     if user_version == CONFIG_VERSION:
         config.update(user_config)
     else:
+        config.update({key: value for key, value in user_config.items() if key in DEFAULT_CONFIG})
+        if user_version < 4:
+            if float(user_config.get("input_gain", 8.0)) == 8.0:
+                config["input_gain"] = DEFAULT_CONFIG["input_gain"]
+            if float(user_config.get("cache_retention_minutes", 10.0)) == 10.0:
+                config["cache_retention_minutes"] = DEFAULT_CONFIG["cache_retention_minutes"]
         for key in PERSIST_ACROSS_CONFIG_VERSION_KEYS:
             if key in user_config:
                 config[key] = user_config[key]

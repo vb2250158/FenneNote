@@ -68,7 +68,9 @@ cd C:\Data\CottonProject\FenneNote
   "device": "cuda",
   "compute_type": "int8_float16",
   "language_mode": "zh",
-  "simplify_chinese": true
+  "simplify_chinese": true,
+  "input_gain": 1.0,
+  "cache_retention_minutes": 0.0
 }
 ```
 
@@ -101,6 +103,8 @@ cd C:\Data\CottonProject\FenneNote
 - `auto_start`
 
 GUI 的“启动后自动开始”勾选会写入 `auto_start`。勾选后，下次打开 FenneNote 会自动开始监听和转写。
+
+配置保存在程序所在目录的 `config.json`。源码运行时是项目目录，打包版运行时是 `dist/FenneNote/`；如果两个入口混用，它们会各自读取自己目录下的配置。
 
 ## 输出
 

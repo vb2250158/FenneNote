@@ -154,7 +154,7 @@ class TranscriberGui(tk.Tk):
             "compute_type": tk.StringVar(value=str(self.config_data.get("compute_type", "int8_float16"))),
             "language": tk.StringVar(value=LANGUAGE_LABELS.get(str(language_code), "简体中文")),
             "simplify_chinese": tk.BooleanVar(value=bool(self.config_data.get("simplify_chinese", True))),
-            "input_gain": tk.DoubleVar(value=float(self.config_data.get("input_gain", 8.0))),
+            "input_gain": tk.DoubleVar(value=float(self.config_data.get("input_gain", DEFAULT_CONFIG["input_gain"]))),
             "record_threshold": tk.DoubleVar(value=float(self.config_data.get("record_threshold", self.config_data.get("rms_threshold", 0.01)))),
             "transcribe_threshold": tk.DoubleVar(value=float(self.config_data.get("transcribe_threshold", 0.015))),
             "adaptive_threshold": tk.BooleanVar(value=bool(self.config_data.get("adaptive_threshold", True))),
@@ -273,7 +273,7 @@ class TranscriberGui(tk.Tk):
         ttk.Label(trigger_group, text="触发模式").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
         ttk.Checkbutton(trigger_group, text="动态识别环境底噪", variable=self.vars["adaptive_threshold"]).grid(row=row, column=1, sticky="w", pady=5)
         row += 1
-        row = self.add_slider(trigger_group, row, "麦克风增益", "input_gain", 1.0, 20.0, 1.0)
+        row = self.add_slider(trigger_group, row, "麦克风增益", "input_gain", 1.0, 5.0, 0.1)
         row = self.add_slider(trigger_group, row, "录音触发阈值", "record_threshold", 0.01, 0.04, 0.001)
         row = self.add_slider(trigger_group, row, "转写判定阈值", "transcribe_threshold", 0.01, 0.06, 0.001)
         row = self.add_slider(trigger_group, row, "触发前保留秒数", "pre_roll_seconds", 0.0, 3.0, 0.1)
