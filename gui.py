@@ -22,6 +22,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
 ICON_PATH = APP_DIR / "assets" / "fennenote.ico"
 ICON_PNG_PATH = APP_DIR / "assets" / "fennec-ear-icon.png"
+BUDDY_IMAGE_PATH = APP_DIR / "assets" / "fennenote-listening-buddy.png"
 CUDA_DLL_DIRS = [
     Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin"),
     Path(r"C:\Program Files\NVIDIA Corporation\NVIDIA Canvas"),
@@ -35,6 +36,25 @@ LANGUAGE_LABELS = {
     "ko": "韩文",
 }
 LANGUAGE_CODES = {label: code for code, label in LANGUAGE_LABELS.items()}
+
+THEME = {
+    "app_bg": "#f7efe1",
+    "panel": "#fffaf1",
+    "panel_alt": "#fff4df",
+    "ink": "#332821",
+    "muted": "#786a5d",
+    "line": "#e7d7bd",
+    "line_strong": "#cfb88f",
+    "sand": "#d9a441",
+    "sand_dark": "#9a6820",
+    "teal": "#159b91",
+    "teal_dark": "#0f6f69",
+    "teal_soft": "#dff4ef",
+    "green": "#22b86f",
+    "danger": "#d45b4c",
+    "canvas": "#fffdf8",
+    "quiet_bar": "#2f2a25",
+}
 
 
 def ensure_cuda_dll_path() -> None:
@@ -128,36 +148,61 @@ class TranscriberGui(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
-        self.configure(bg="#f4f5f7")
+        self.configure(bg=THEME["app_bg"])
         style.configure(".", font=("Microsoft YaHei UI", 9))
-        style.configure("TFrame", background="#f4f5f7")
-        style.configure("Panel.TFrame", background="#ffffff")
-        style.configure("TLabel", background="#f4f5f7", foreground="#222222")
-        style.configure("Title.TLabel", background="#ffffff", foreground="#111111", font=("Microsoft YaHei UI", 12, "bold"))
-        style.configure("Muted.TLabel", background="#ffffff", foreground="#666666")
-        style.configure("Status.TLabel", background="#ffffff", foreground="#0a8f3c", font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("TLabelframe", background="#ffffff", bordercolor="#d6d8dc")
-        style.configure("TLabelframe.Label", background="#ffffff", foreground="#111111", font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("TButton", padding=(12, 5))
-        style.configure("Primary.TButton", padding=(16, 6))
+        style.configure("TFrame", background=THEME["app_bg"])
+        style.configure("Panel.TFrame", background=THEME["panel"])
+        style.configure("Brand.TFrame", background=THEME["panel_alt"])
+        style.configure("TLabel", background=THEME["panel"], foreground=THEME["ink"])
+        style.configure("Root.TLabel", background=THEME["app_bg"], foreground=THEME["ink"])
+        style.configure("BrandTitle.TLabel", background=THEME["panel_alt"], foreground=THEME["ink"], font=("Microsoft YaHei UI", 15, "bold"))
+        style.configure("BrandSub.TLabel", background=THEME["panel_alt"], foreground=THEME["muted"], font=("Microsoft YaHei UI", 9))
+        style.configure("Title.TLabel", background=THEME["panel"], foreground=THEME["ink"], font=("Microsoft YaHei UI", 12, "bold"))
+        style.configure("Muted.TLabel", background=THEME["panel"], foreground=THEME["muted"])
+        style.configure("Status.TLabel", background=THEME["panel"], foreground=THEME["teal_dark"], font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("Chip.TLabel", background=THEME["teal_soft"], foreground=THEME["teal_dark"], padding=(10, 4), font=("Microsoft YaHei UI", 9, "bold"))
+        style.configure("TLabelframe", background=THEME["panel"], bordercolor=THEME["line"], lightcolor=THEME["line"], darkcolor=THEME["line"])
+        style.configure("TLabelframe.Label", background=THEME["panel"], foreground=THEME["sand_dark"], font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("TButton", padding=(12, 6), background="#fff7e8", foreground=THEME["ink"], bordercolor=THEME["line_strong"], focusthickness=0)
+        style.map("TButton", background=[("active", "#ffefd0"), ("pressed", "#ead1a2")])
+        style.configure("Primary.TButton", padding=(18, 7), background=THEME["teal"], foreground="#ffffff", bordercolor=THEME["teal_dark"], font=("Microsoft YaHei UI", 9, "bold"))
+        style.map("Primary.TButton", background=[("active", "#19ada2"), ("pressed", THEME["teal_dark"]), ("disabled", "#b7c8c5")], foreground=[("disabled", "#f2f2f2")])
+        style.configure("Danger.TButton", padding=(12, 6), background="#fff0ec", foreground=THEME["danger"], bordercolor="#efb4aa")
+        style.map("Danger.TButton", background=[("active", "#ffe1da"), ("pressed", "#f5c2b8")])
+        style.configure("TCheckbutton", background=THEME["panel"], foreground=THEME["ink"], indicatorcolor="#f5e5c8", indicatordiameter=14)
+        style.map("TCheckbutton", indicatorcolor=[("selected", THEME["teal"]), ("active", THEME["sand"])])
+        style.configure("TCombobox", fieldbackground="#fffdf8", background="#fff7e8", foreground=THEME["ink"], arrowcolor=THEME["teal_dark"], bordercolor=THEME["line"])
+        style.configure("Horizontal.TScale", background=THEME["panel"], troughcolor="#ecdabc")
+        style.configure("Fenne.Horizontal.TProgressbar", troughcolor="#eadcc4", background=THEME["teal"], bordercolor=THEME["line"], lightcolor=THEME["teal"], darkcolor=THEME["teal_dark"])
 
     def build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
 
-        toolbar = ttk.Frame(self, padding=(14, 10), style="Panel.TFrame")
+        toolbar = ttk.Frame(self, padding=(16, 12), style="Brand.TFrame")
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(6, weight=1)
+        toolbar.columnconfigure(8, weight=1)
+
+        if ICON_PNG_PATH.exists():
+            try:
+                self.brand_icon_image = tk.PhotoImage(file=str(ICON_PNG_PATH)).subsample(8, 8)
+                ttk.Label(toolbar, image=self.brand_icon_image, style="BrandSub.TLabel").grid(row=0, column=0, rowspan=2, padx=(0, 12))
+            except tk.TclError:
+                pass
+        brand = ttk.Frame(toolbar, style="Brand.TFrame")
+        brand.grid(row=0, column=1, rowspan=2, sticky="w", padx=(0, 24))
+        ttk.Label(brand, text="FenneNote", style="BrandTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(brand, text="芬妮笔记 · 本地 GPU 实时听写", style="BrandSub.TLabel").grid(row=1, column=0, sticky="w")
 
         self.start_button = ttk.Button(toolbar, text="开始", command=self.start_transcriber, style="Primary.TButton")
-        self.start_button.grid(row=0, column=0, padx=(0, 8))
+        self.start_button.grid(row=0, column=2, rowspan=2, padx=(0, 8))
         self.pause_button = ttk.Button(toolbar, text="暂停", command=self.toggle_pause, state="disabled")
-        self.pause_button.grid(row=0, column=1, padx=(0, 8))
-        self.stop_button = ttk.Button(toolbar, text="停止", command=self.stop_transcriber, state="disabled")
-        self.stop_button.grid(row=0, column=2, padx=(0, 16))
-        ttk.Button(toolbar, text="保存配置", command=self.save_config).grid(row=0, column=3, padx=(0, 8))
-        ttk.Button(toolbar, text="打开目录", command=self.open_output_folder).grid(row=0, column=4, padx=(0, 16))
-        ttk.Label(toolbar, textvariable=self.vars["status"]).grid(row=0, column=6, sticky="e")
+        self.pause_button.grid(row=0, column=3, rowspan=2, padx=(0, 8))
+        self.stop_button = ttk.Button(toolbar, text="停止", command=self.stop_transcriber, state="disabled", style="Danger.TButton")
+        self.stop_button.grid(row=0, column=4, rowspan=2, padx=(0, 14))
+        ttk.Button(toolbar, text="保存配置", command=self.save_config).grid(row=0, column=5, rowspan=2, padx=(0, 8))
+        ttk.Button(toolbar, text="打开目录", command=self.open_output_folder).grid(row=0, column=6, rowspan=2, padx=(0, 16))
+        ttk.Label(toolbar, text="CUDA", style="Chip.TLabel").grid(row=0, column=7, rowspan=2, sticky="e")
 
         main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main.grid(row=1, column=0, sticky="nsew", padx=14, pady=14)
@@ -165,7 +210,7 @@ class TranscriberGui(tk.Tk):
         settings_shell = ttk.Frame(main, padding=0, style="Panel.TFrame")
         settings_shell.rowconfigure(0, weight=1)
         settings_shell.columnconfigure(0, weight=1)
-        settings_canvas = tk.Canvas(settings_shell, width=360, bg="#ffffff", highlightthickness=0)
+        settings_canvas = tk.Canvas(settings_shell, width=370, bg=THEME["panel"], highlightthickness=0)
         settings_scrollbar = ttk.Scrollbar(settings_shell, orient="vertical", command=settings_canvas.yview)
         settings_canvas.grid(row=0, column=0, sticky="nsew")
         settings_scrollbar.grid(row=0, column=1, sticky="ns")
@@ -226,16 +271,23 @@ class TranscriberGui(tk.Tk):
         monitor = ttk.Frame(right, padding=14, style="Panel.TFrame")
         monitor.grid(row=0, column=0, sticky="ew")
         monitor.columnconfigure(0, weight=1)
+        monitor.columnconfigure(1, weight=0)
         ttk.Label(monitor, text="实时监测", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(monitor, textvariable=self.vars["trigger_state"], style="Status.TLabel").grid(row=0, column=1, sticky="e")
+        ttk.Label(monitor, textvariable=self.vars["status"], style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         meter = ttk.Frame(monitor, style="Panel.TFrame")
-        meter.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 6))
+        meter.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 6))
         meter.columnconfigure(0, weight=1)
-        self.level_bar = ttk.Progressbar(meter, variable=self.vars["mic_level"], maximum=0.04)
+        self.level_bar = ttk.Progressbar(meter, variable=self.vars["mic_level"], maximum=0.04, style="Fenne.Horizontal.TProgressbar")
         self.level_bar.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         ttk.Label(meter, textvariable=self.vars["mic_level_text"], style="Muted.TLabel").grid(row=0, column=1, sticky="e")
-        self.wave_canvas = tk.Canvas(monitor, height=126, bg="#ffffff", highlightthickness=1, highlightbackground="#d6d8dc")
-        self.wave_canvas.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.wave_canvas = tk.Canvas(monitor, height=132, bg=THEME["canvas"], highlightthickness=1, highlightbackground=THEME["line"])
+        self.wave_canvas.grid(row=3, column=0, columnspan=2, sticky="ew")
+        if BUDDY_IMAGE_PATH.exists():
+            try:
+                self.buddy_image = tk.PhotoImage(file=str(BUDDY_IMAGE_PATH))
+            except tk.TclError:
+                self.buddy_image = None
 
         transcript_frame = ttk.Frame(right, padding=(14, 0, 14, 14), style="Panel.TFrame")
         transcript_frame.grid(row=1, column=0, sticky="nsew")
@@ -248,14 +300,30 @@ class TranscriberGui(tk.Tk):
         ttk.Label(preview_header, text="转写预览", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(preview_header, text="清空预览", command=self.clear_preview).grid(row=0, column=1, sticky="e")
 
-        self.transcript = tk.Text(transcript_frame, wrap="word", undo=False)
+        self.transcript = tk.Text(
+            transcript_frame,
+            wrap="word",
+            undo=False,
+            bg=THEME["canvas"],
+            fg=THEME["ink"],
+            insertbackground=THEME["teal_dark"],
+            relief="flat",
+            padx=14,
+            pady=12,
+            font=("Microsoft YaHei UI", 10),
+            selectbackground=THEME["teal_soft"],
+            selectforeground=THEME["ink"],
+            highlightthickness=1,
+            highlightbackground=THEME["line"],
+            highlightcolor=THEME["teal"],
+        )
         self.transcript.grid(row=1, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(transcript_frame, orient="vertical", command=self.transcript.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
         self.transcript.configure(yscrollcommand=scrollbar.set)
-        self.transcript.tag_configure("placeholder", foreground="#777777")
-        self.transcript.tag_configure("log", foreground="#666666")
-        self.transcript.tag_configure("text", foreground="#111111")
+        self.transcript.tag_configure("placeholder", foreground=THEME["muted"])
+        self.transcript.tag_configure("log", foreground=THEME["sand_dark"])
+        self.transcript.tag_configure("text", foreground=THEME["ink"])
         self.show_placeholder()
 
     def add_combo(self, parent: ttk.Frame, row: int, label: str, key: str, values: list[str]) -> tuple[ttk.Combobox, int]:
@@ -394,15 +462,19 @@ class TranscriberGui(tk.Tk):
         canvas.delete("all")
         record_y = height - min(record_threshold / max_scale, 1.0) * height
         transcribe_y = height - min(transcribe_threshold / max_scale, 1.0) * height
-        canvas.create_line(0, record_y, width, record_y, fill="#d23f31", width=2)
+        canvas.create_rectangle(0, 0, width, height, fill=THEME["canvas"], outline="")
+        for guide_index in range(1, 4):
+            y = height * guide_index / 4
+            canvas.create_line(0, y, width, y, fill="#f2e5cf", width=1)
+        canvas.create_line(0, record_y, width, record_y, fill=THEME["danger"], width=2)
         record_label_y = max(10, min(height - 10, record_y - 8))
         transcribe_label_y = max(10, min(height - 10, transcribe_y - 8))
         if abs(record_label_y - transcribe_label_y) < 14:
             record_label_y = max(10, record_label_y - 8)
             transcribe_label_y = min(height - 10, transcribe_label_y + 8)
-        canvas.create_text(4, record_label_y, text="录音线", anchor="w", fill="#d23f31")
-        canvas.create_line(0, transcribe_y, width, transcribe_y, fill="#e08a00", width=2, dash=(4, 3))
-        canvas.create_text(width - 4, transcribe_label_y, text="转写线", anchor="e", fill="#e08a00")
+        canvas.create_text(8, record_label_y, text="录音线", anchor="w", fill=THEME["danger"], font=("Microsoft YaHei UI", 9, "bold"))
+        canvas.create_line(0, transcribe_y, width, transcribe_y, fill=THEME["sand"], width=2, dash=(4, 3))
+        canvas.create_text(width - 8, transcribe_label_y, text="转写线", anchor="e", fill=THEME["sand_dark"], font=("Microsoft YaHei UI", 9, "bold"))
         values = list(self.bar_history)
         if not values:
             return
@@ -418,10 +490,14 @@ class TranscriberGui(tk.Tk):
             normalized = min(value / max_scale, 1.0)
             bar_height = max(2.0, normalized * (height - 8)) if value > 0 else 0
             y0 = height - bar_height
-            color = "#2a2a2a" if value < record_threshold else "#0a8f3c"
+            color = THEME["quiet_bar"] if value < record_threshold else THEME["teal"]
             if value >= transcribe_threshold:
-                color = "#19b85a"
+                color = THEME["green"]
             canvas.create_rectangle(x0, y0, x1, height, fill=color, outline="")
+            if value >= record_threshold:
+                canvas.create_rectangle(x0, max(y0, height - 4), x1, height, fill="#b8f0d8", outline="")
+        if getattr(self, "buddy_image", None):
+            canvas.create_image(width - 92, 64, image=self.buddy_image, anchor="center")
 
     def list_input_devices(self) -> list[tuple[int, str]]:
         devices: list[tuple[int, str]] = []
