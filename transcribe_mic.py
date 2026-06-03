@@ -10,6 +10,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -62,6 +64,14 @@ DEFAULT_CONFIG = {
     "beam_size": 1,
     "condition_on_previous_text": False,
     "mic_device": None,
+    "reply_bubble_enabled": True,
+    "reply_bubble_port": 8792,
+    "reply_bubble_seconds": 3.0,
+    "reply_bubble_token": "",
+    "rabiroute_enabled": False,
+    "rabiroute_url": "http://127.0.0.1:8791/webhook",
+    "rabiroute_token": "",
+    "rabiroute_source": "fennenote",
 }
 
 PERSIST_ACROSS_CONFIG_VERSION_KEYS = {
@@ -208,6 +218,44 @@ def append_line(output_dir: Path, started_at: datetime, text: str) -> None:
         handle.write(line)
         handle.flush()
     print(line, end="", flush=True)
+
+
+def post_rabiroute_event(config: dict, phrase: Phrase, text: str) -> None:
+    if not bool(config.get("rabiroute_enabled", False)):
+        return
+    url = str(config.get("rabiroute_url", "")).strip()
+    if not url:
+        return
+    payload = {
+        "type": "voice_transcript",
+        "source": str(config.get("rabiroute_source", "fennenote") or "fennenote"),
+        "text": text,
+        "startedAt": phrase.started_at.isoformat(),
+        "endedAt": phrase.ended_at.isoformat(),
+        "durationSeconds": round((phrase.ended_at - phrase.started_at).total_seconds(), 2),
+        "peak": round(float(phrase.peak), 4),
+        "time": int(phrase.started_at.timestamp()),
+        "messageId": f"fennenote-{int(phrase.started_at.timestamp() * 1000)}",
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "FenneNote",
+        },
+    )
+    token = str(config.get("rabiroute_token", "")).strip()
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            if response.status >= 400:
+                emit_status("route_error", f"RabiRoute 推送失败：HTTP {response.status}")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        emit_status("route_error", f"RabiRoute 推送失败：{exc}")
 
 
 def simplify_text(text: str, converter: OpenCC | None) -> str:
@@ -449,6 +497,7 @@ def transcribe_loop(config: dict) -> None:
             emit_status("discarded", "本段已转写但没有保留有效文字，已丢弃")
             continue
         append_line(output_dir, phrase.started_at, text)
+        post_rabiroute_event(config, phrase, text)
         emit_status("written", "转写完成，已写入今日文本")
 
 

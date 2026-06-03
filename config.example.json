@@ -29,5 +29,13 @@
   "vad_filter": true,
   "beam_size": 1,
   "condition_on_previous_text": false,
-  "mic_device": null
+  "mic_device": null,
+  "reply_bubble_enabled": true,
+  "reply_bubble_port": 8792,
+  "reply_bubble_seconds": 3.0,
+  "reply_bubble_token": "",
+  "rabiroute_enabled": false,
+  "rabiroute_url": "http://127.0.0.1:8791/webhook",
+  "rabiroute_token": "",
+  "rabiroute_source": "fennenote"
 }

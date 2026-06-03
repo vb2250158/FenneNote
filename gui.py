@@ -9,6 +9,7 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -127,6 +128,9 @@ class TranscriberGui(tk.Tk):
         self.is_paused = False
         self.buddy_state = "idle"
         self.writing_until = 0.0
+        self.reply_server: ThreadingHTTPServer | None = None
+        self.reply_server_thread: threading.Thread | None = None
+        self.reply_bubble: tk.Toplevel | None = None
 
         ensure_bundled_config_template()
         self.config_data = load_config(CONFIG_PATH)
@@ -136,6 +140,7 @@ class TranscriberGui(tk.Tk):
         self.setup_style()
         self.build_ui()
         self.start_level_monitor()
+        self.configure_reply_bubble_server()
         self.refresh_tail(reset=True)
         self.after(150, self.drain_process_output)
         self.after(80, self.drain_level_preview)
@@ -178,6 +183,14 @@ class TranscriberGui(tk.Tk):
             "trigger_state": tk.StringVar(value="状态：监听中"),
             "status": tk.StringVar(value="就绪"),
             "auto_start": tk.BooleanVar(value=bool(self.config_data.get("auto_start", False))),
+            "reply_bubble_enabled": tk.BooleanVar(value=bool(self.config_data.get("reply_bubble_enabled", DEFAULT_CONFIG["reply_bubble_enabled"]))),
+            "reply_bubble_port": tk.IntVar(value=int(self.config_data.get("reply_bubble_port", DEFAULT_CONFIG["reply_bubble_port"]))),
+            "reply_bubble_seconds": tk.DoubleVar(value=float(self.config_data.get("reply_bubble_seconds", DEFAULT_CONFIG["reply_bubble_seconds"]))),
+            "reply_bubble_token": tk.StringVar(value=str(self.config_data.get("reply_bubble_token", DEFAULT_CONFIG["reply_bubble_token"]))),
+            "rabiroute_enabled": tk.BooleanVar(value=bool(self.config_data.get("rabiroute_enabled", DEFAULT_CONFIG["rabiroute_enabled"]))),
+            "rabiroute_url": tk.StringVar(value=str(self.config_data.get("rabiroute_url", DEFAULT_CONFIG["rabiroute_url"]))),
+            "rabiroute_token": tk.StringVar(value=str(self.config_data.get("rabiroute_token", DEFAULT_CONFIG["rabiroute_token"]))),
+            "rabiroute_source": tk.StringVar(value=str(self.config_data.get("rabiroute_source", DEFAULT_CONFIG["rabiroute_source"]))),
         }
 
     def setup_style(self) -> None:
@@ -279,6 +292,7 @@ class TranscriberGui(tk.Tk):
         input_settings = add_settings_page("输入")
         trigger_settings = add_settings_page("触发")
         app_settings = add_settings_page("应用")
+        route_settings = add_settings_page("路由")
 
         input_group = ttk.LabelFrame(input_settings, text="输入与模型", padding=12)
         input_group.grid(row=0, column=0, sticky="ew")
@@ -323,8 +337,33 @@ class TranscriberGui(tk.Tk):
         ttk.Checkbutton(app_group, text="启动后自动开始", variable=self.vars["auto_start"]).grid(row=0, column=0, columnspan=2, sticky="w")
         self.add_slider(app_group, 1, "缓存保留分钟", "cache_retention_minutes", 0.0, 60.0, 1.0)
 
+        bubble_group = ttk.LabelFrame(app_settings, text="反向路由气泡", padding=12)
+        bubble_group.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        bubble_group.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            bubble_group,
+            text="启用左下角气泡",
+            variable=self.vars["reply_bubble_enabled"],
+            command=self.configure_reply_bubble_server,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        row = 1
+        ttk.Label(bubble_group, text="监听端口").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Spinbox(
+            bubble_group,
+            from_=1024,
+            to=65535,
+            increment=1,
+            textvariable=self.vars["reply_bubble_port"],
+            width=10,
+            command=self.configure_reply_bubble_server,
+        ).grid(row=row, column=1, sticky="w", pady=5)
+        row += 1
+        row = self.add_slider(bubble_group, row, "持续秒数", "reply_bubble_seconds", 1.0, 10.0, 0.5)
+        ttk.Label(bubble_group, text="访问令牌").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Entry(bubble_group, textvariable=self.vars["reply_bubble_token"], show="*", width=24).grid(row=row, column=1, sticky="ew", pady=5)
+
         storage_group = ttk.LabelFrame(app_settings, text="本地数据", padding=12)
-        storage_group.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        storage_group.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         storage_group.columnconfigure(1, weight=1)
         ttk.Label(storage_group, text="配置").grid(row=0, column=0, sticky="w", pady=5, padx=(0, 10))
         ttk.Label(storage_group, text=str(CONFIG_PATH), style="Muted.TLabel", wraplength=250).grid(row=0, column=1, sticky="ew", pady=5)
@@ -335,6 +374,16 @@ class TranscriberGui(tk.Tk):
         folder_buttons.columnconfigure((0, 1), weight=1)
         ttk.Button(folder_buttons, text="打开转写目录", command=self.open_output_folder).grid(row=0, column=0, sticky="ew", padx=(0, 6))
         ttk.Button(folder_buttons, text="打开缓存目录", command=self.open_cache_folder).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        route_group = ttk.LabelFrame(route_settings, text="RabiRoute 输出", padding=12)
+        route_group.grid(row=0, column=0, sticky="ew")
+        route_group.columnconfigure(1, weight=1)
+        ttk.Checkbutton(route_group, text="转写完成后推送到 RabiRoute", variable=self.vars["rabiroute_enabled"]).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        row = 1
+        row = self.add_entry(route_group, row, "推送 URL", "rabiroute_url")
+        row = self.add_entry(route_group, row, "来源 ID", "rabiroute_source")
+        ttk.Label(route_group, text="访问令牌").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Entry(route_group, textvariable=self.vars["rabiroute_token"], show="*").grid(row=row, column=1, sticky="ew", pady=5)
 
         right = ttk.Frame(main, padding=0, style="Panel.TFrame")
         right.columnconfigure(0, weight=1)
@@ -640,6 +689,14 @@ class TranscriberGui(tk.Tk):
                 "cache_dir": str(config.get("cache_dir", DEFAULT_CONFIG["cache_dir"])),
                 "cache_retention_minutes": round(max(0.0, min(60.0, float(self.vars["cache_retention_minutes"].get()))), 1),
                 "mic_device": self.selected_device_index(),
+                "reply_bubble_enabled": bool(self.vars["reply_bubble_enabled"].get()),
+                "reply_bubble_port": max(1024, min(65535, int(self.vars["reply_bubble_port"].get()))),
+                "reply_bubble_seconds": round(max(1.0, min(10.0, float(self.vars["reply_bubble_seconds"].get()))), 1),
+                "reply_bubble_token": self.vars["reply_bubble_token"].get().strip(),
+                "rabiroute_enabled": bool(self.vars["rabiroute_enabled"].get()),
+                "rabiroute_url": self.vars["rabiroute_url"].get().strip(),
+                "rabiroute_token": self.vars["rabiroute_token"].get().strip(),
+                "rabiroute_source": self.vars["rabiroute_source"].get().strip() or "fennenote",
             }
         )
         return config
@@ -648,6 +705,7 @@ class TranscriberGui(tk.Tk):
         config = self.collect_config()
         write_config(CONFIG_PATH, config)
         self.config_data = config
+        self.configure_reply_bubble_server()
         self.vars["status"].set("配置已保存")
 
     def start_transcriber(self) -> None:
@@ -735,6 +793,97 @@ class TranscriberGui(tk.Tk):
         self.transcript.insert(tk.END, f"系统：{line.strip()}\n", "log")
         self.transcript.see(tk.END)
 
+    def configure_reply_bubble_server(self) -> None:
+        self.stop_reply_bubble_server()
+        if not bool(self.vars["reply_bubble_enabled"].get()):
+            return
+        try:
+            port = max(1024, min(65535, int(self.vars["reply_bubble_port"].get())))
+        except (tk.TclError, ValueError):
+            port = int(DEFAULT_CONFIG["reply_bubble_port"])
+            self.vars["reply_bubble_port"].set(port)
+        token = self.vars["reply_bubble_token"].get().strip()
+        owner = self
+
+        class ReplyHandler(BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *_args) -> None:
+                return
+
+            def do_POST(self) -> None:
+                if self.path not in {"/reply", "/bubble", "/rabiroute/reply"}:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                expected = token
+                provided = self.headers.get("X-FenneNote-Token", "")
+                if expected and provided != expected:
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(min(length, 65536)).decode("utf-8-sig") or "{}")
+                except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                title = str(payload.get("title") or payload.get("sender") or "RabiRoute")
+                text = str(payload.get("text") or payload.get("message") or payload.get("content") or "").strip()
+                if not text:
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                owner.after(0, lambda: owner.show_reply_bubble(title, text))
+                self.send_response(204)
+                self.end_headers()
+
+        try:
+            self.reply_server = ThreadingHTTPServer(("127.0.0.1", port), ReplyHandler)
+            self.reply_server_thread = threading.Thread(target=self.reply_server.serve_forever, daemon=True)
+            self.reply_server_thread.start()
+            self.vars["status"].set(f"反向气泡监听：127.0.0.1:{port}/reply")
+        except OSError as exc:
+            self.reply_server = None
+            self.reply_server_thread = None
+            self.vars["status"].set(f"反向气泡监听失败：{exc}")
+
+    def stop_reply_bubble_server(self) -> None:
+        if self.reply_server is None:
+            return
+        server = self.reply_server
+        self.reply_server = None
+        self.reply_server_thread = None
+        try:
+            server.shutdown()
+            server.server_close()
+        except OSError:
+            pass
+
+    def show_reply_bubble(self, title: str, text: str) -> None:
+        if not bool(self.vars["reply_bubble_enabled"].get()):
+            return
+        if self.reply_bubble is not None and self.reply_bubble.winfo_exists():
+            self.reply_bubble.destroy()
+        bubble = tk.Toplevel(self)
+        self.reply_bubble = bubble
+        bubble.overrideredirect(True)
+        bubble.attributes("-topmost", True)
+        bubble.configure(bg=THEME["teal_dark"])
+        body = tk.Frame(bubble, bg=THEME["teal_soft"], padx=14, pady=12, highlightthickness=1, highlightbackground=THEME["teal"])
+        body.pack(fill="both", expand=True, padx=2, pady=2)
+        tk.Label(body, text=title[:48], bg=THEME["teal_soft"], fg=THEME["teal_dark"], font=("Microsoft YaHei UI", 10, "bold"), anchor="w").pack(fill="x")
+        tk.Label(body, text=text[:240], bg=THEME["teal_soft"], fg=THEME["ink"], font=("Microsoft YaHei UI", 10), justify="left", anchor="w", wraplength=300).pack(fill="x", pady=(6, 0))
+        bubble.update_idletasks()
+        width = max(280, min(360, bubble.winfo_reqwidth()))
+        height = max(90, bubble.winfo_reqheight())
+        screen_width = bubble.winfo_screenwidth()
+        screen_height = bubble.winfo_screenheight()
+        x = 18
+        y = screen_height - height - 58
+        bubble.geometry(f"{width}x{height}+{x}+{y}")
+        seconds = max(1.0, min(10.0, float(self.vars["reply_bubble_seconds"].get())))
+        bubble.after(int(seconds * 1000), lambda: bubble.destroy() if bubble.winfo_exists() else None)
+
     def show_placeholder(self) -> None:
         self.transcript.delete("1.0", tk.END)
         self.transcript.insert(
@@ -807,6 +956,7 @@ class TranscriberGui(tk.Tk):
             if not messagebox.askyesno("实时语音转文字", "停止转写并关闭窗口吗？"):
                 return
             self.stop_transcriber()
+        self.stop_reply_bubble_server()
         self.stop_level_monitor()
         self.destroy()
 

@@ -31,6 +31,8 @@
 - 按日期写入 `transcripts/YYYY-MM-DD.txt`
 - 模型缓存、临时缓存和转写输出默认都放在安装目录下
 - 配置可保存，支持配置版本迁移和启动后自动开始
+- 可选推送转写事件到 RabiRoute，作为 `voice_transcript` 路由输入
+- 可接收反向路由消息，并在屏幕左下角弹出 3 秒气泡
 
 ## 启动
 
@@ -105,6 +107,33 @@ cd C:\Data\CottonProject\FenneNote
 GUI 的“启动后自动开始”勾选会写入 `auto_start`。勾选后，下次打开 FenneNote 会自动开始监听和转写。
 
 配置保存在程序所在目录的 `config.json`。源码运行时是项目目录，打包版运行时是 `dist/FenneNote/`；如果两个入口混用，它们会各自读取自己目录下的配置。
+
+## RabiRoute 接入
+
+FenneNote 可以作为 RabiRoute 的语音输入端。GUI 的“路由”页勾选“转写完成后推送到 RabiRoute”，默认推送地址是：
+
+```text
+http://127.0.0.1:8791/webhook
+```
+
+RabiRoute 侧启用 `Webhook / FenneNote` 消息适配器后，会把转写段识别为 `voice_transcript` 路由，并写入 `voice-transcripts.jsonl`。
+
+FenneNote 也支持反向路由气泡。GUI 的“应用”页默认勾选“启用左下角气泡”，本地回调地址是：
+
+```text
+http://127.0.0.1:8792/reply
+```
+
+POST 示例：
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8792/reply" `
+  -ContentType "application/json; charset=utf-8" `
+  -Body (@{ title="RabiRoute"; text="已收到语音笔记。" } | ConvertTo-Json -Compress)
+```
+
+气泡默认显示 3 秒，可在 GUI 中调整。
 
 ## 输出
 
