@@ -1,5 +1,5 @@
 {
-  "config_version": 2,
+  "config_version": 3,
   "auto_start": false,
   "model": "small",
   "device": "cuda",
@@ -10,6 +10,8 @@
   "drop_non_chinese_in_zh": true,
   "initial_prompt": "以下是简体中文普通话办公场景转写，可能包含 Unity、Editor、GPU、CPU、AI、Bug、微信、项目、功能、消息、发送、测试等术语。请保持中文为简体，英文术语保留英文。",
   "output_dir": "transcripts",
+  "cache_dir": "cache",
+  "cache_retention_minutes": 10.0,
   "sample_rate": 16000,
   "chunk_seconds": 0.5,
   "pre_roll_seconds": 1.5,

@@ -2,6 +2,7 @@
 .venv-gpu/
 config.json
 transcripts/
+cache/
 __pycache__/
 *.pyc
 reference-cache/

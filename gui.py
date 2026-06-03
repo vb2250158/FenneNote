@@ -15,7 +15,7 @@ from tkinter import messagebox, ttk
 import numpy as np
 import sounddevice as sd
 
-from transcribe_mic import DEFAULT_CONFIG, load_config, main as transcribe_cli_main, save_config as write_config, today_output_path
+from transcribe_mic import DEFAULT_CONFIG, configure_local_storage, load_config, main as transcribe_cli_main, save_config as write_config, today_output_path
 
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -79,6 +79,14 @@ def ensure_bundled_config_template() -> None:
         CONFIG_EXAMPLE_PATH.write_text(BUNDLED_CONFIG_EXAMPLE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
     except OSError:
         pass
+
+
+def prepare_process_environment(config: dict) -> dict[str, str]:
+    configure_local_storage(config)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
 
 
 class TranscriberGui(tk.Tk):
@@ -147,6 +155,7 @@ class TranscriberGui(tk.Tk):
             "transcribe_pause_seconds": tk.DoubleVar(value=float(self.config_data.get("transcribe_pause_seconds", 0.5))),
             "silence_seconds": tk.DoubleVar(value=float(self.config_data.get("silence_seconds", 1.2))),
             "max_phrase_seconds": tk.DoubleVar(value=float(self.config_data.get("max_phrase_seconds", 12.0))),
+            "cache_retention_minutes": tk.DoubleVar(value=float(self.config_data.get("cache_retention_minutes", DEFAULT_CONFIG["cache_retention_minutes"]))),
             "mic_device": tk.StringVar(value=self.device_label_for(device_index)),
             "mic_level": tk.DoubleVar(value=0.0),
             "mic_level_text": tk.StringVar(value="原始 0.000 / 增益后 0.000 / 录音 0.010 / 转写 0.015"),
@@ -274,7 +283,9 @@ class TranscriberGui(tk.Tk):
 
         app_group = ttk.LabelFrame(settings, text="启动行为", padding=12)
         app_group.grid(row=3, column=0, sticky="ew", pady=(12, 0))
-        ttk.Checkbutton(app_group, text="启动后自动开始", variable=self.vars["auto_start"]).grid(row=0, column=0, sticky="w")
+        app_group.columnconfigure(1, weight=1)
+        ttk.Checkbutton(app_group, text="启动后自动开始", variable=self.vars["auto_start"]).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.add_slider(app_group, 1, "缓存保留分钟", "cache_retention_minutes", 0.0, 60.0, 1.0)
 
         right = ttk.Frame(main, padding=0, style="Panel.TFrame")
         right.columnconfigure(0, weight=1)
@@ -558,6 +569,8 @@ class TranscriberGui(tk.Tk):
                 "transcribe_pause_seconds": round(float(self.vars["transcribe_pause_seconds"].get()), 1),
                 "silence_seconds": round(float(self.vars["silence_seconds"].get()), 2),
                 "max_phrase_seconds": round(float(self.vars["max_phrase_seconds"].get()), 1),
+                "cache_dir": str(config.get("cache_dir", DEFAULT_CONFIG["cache_dir"])),
+                "cache_retention_minutes": round(max(0.0, min(60.0, float(self.vars["cache_retention_minutes"].get()))), 1),
                 "mic_device": self.selected_device_index(),
             }
         )
@@ -583,9 +596,7 @@ class TranscriberGui(tk.Tk):
             command = [sys.executable, str(APP_DIR / "transcribe_mic.py"), "--config", str(CONFIG_PATH)]
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        child_env = os.environ.copy()
-        child_env["PYTHONIOENCODING"] = "utf-8"
-        child_env["PYTHONUTF8"] = "1"
+        child_env = prepare_process_environment(self.collect_config())
         self.process = subprocess.Popen(
             command,
             cwd=str(APP_DIR),
@@ -716,6 +727,7 @@ def main() -> int:
         sys.argv.remove("--transcribe-child")
         return transcribe_cli_main()
     ensure_cuda_dll_path()
+    configure_local_storage()
     app = TranscriberGui()
     app.mainloop()
     return 0

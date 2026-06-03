@@ -29,6 +29,7 @@
 - 低于转写线一段时间后自动切段并转写
 - 中文转简体，英文术语保留
 - 按日期写入 `transcripts/YYYY-MM-DD.txt`
+- 模型缓存、临时缓存和转写输出默认都放在安装目录下
 - 配置可保存，支持配置版本迁移和启动后自动开始
 
 ## 启动
@@ -114,6 +115,21 @@ transcripts/2026-06-03.txt
 ```powershell
 Get-Content .\transcripts\2026-06-03.txt -Wait -Encoding UTF8
 ```
+
+## 缓存与硬盘占用
+
+FenneNote 默认把运行数据放在安装目录下：
+
+```text
+cache/models/       Whisper 模型缓存
+cache/huggingface/  Hugging Face 下载缓存
+cache/temp/         临时文件
+cache/audio/        预留音频临时缓存
+transcripts/        转写文本
+config.json         本机配置
+```
+
+当前录音片段只在内存中缓存，转写完成后会释放，不会长期保存为音频文件。`缓存保留分钟` 用于清理 `cache/temp/` 和 `cache/audio/` 里的临时文件，范围是 0 到 60 分钟；设为 0 时会尽快清理临时缓存。模型缓存保留在 `cache/models/`，不会按这个参数自动删除，避免每次启动重新下载模型。
 
 ## 麦克风选择
 

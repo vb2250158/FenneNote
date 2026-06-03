@@ -7,6 +7,7 @@ import queue
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -26,7 +27,9 @@ CUDA_DLL_DIRS = [
     Path(r"C:\Program Files\NVIDIA Corporation\NVIDIA Canvas"),
 ]
 
-CONFIG_VERSION = 2
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+
+CONFIG_VERSION = 3
 
 DEFAULT_CONFIG = {
     "config_version": CONFIG_VERSION,
@@ -40,6 +43,8 @@ DEFAULT_CONFIG = {
     "drop_non_chinese_in_zh": True,
     "initial_prompt": "以下是简体中文普通话办公场景转写，可能包含 Unity、Editor、GPU、CPU、AI、Bug、微信、项目、功能、消息、发送、测试等术语。请保持中文为简体，英文术语保留英文。",
     "output_dir": "transcripts",
+    "cache_dir": "cache",
+    "cache_retention_minutes": 10.0,
     "sample_rate": 16000,
     "chunk_seconds": 0.5,
     "pre_roll_seconds": 1.5,
@@ -64,6 +69,61 @@ PERSIST_ACROSS_CONFIG_VERSION_KEYS = {
     "auto_start",
     "mic_device",
 }
+
+
+def app_path(path_text: str) -> Path:
+    path = Path(path_text)
+    if path.is_absolute():
+        return path
+    return APP_DIR / path
+
+
+def cleanup_old_files(directory: Path, max_age_seconds: float) -> None:
+    if max_age_seconds < 0 or not directory.exists():
+        return
+    cutoff = time.time() - max_age_seconds
+    for path in directory.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_mtime <= cutoff:
+                path.unlink()
+        except OSError:
+            pass
+    for path in sorted((item for item in directory.rglob("*") if item.is_dir()), key=lambda item: len(item.parts), reverse=True):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+
+def configure_local_storage(config: dict | None = None) -> dict[str, Path]:
+    config = DEFAULT_CONFIG if config is None else config
+    cache_root = app_path(str(config.get("cache_dir", DEFAULT_CONFIG["cache_dir"]))).resolve()
+    dirs = {
+        "cache": cache_root,
+        "hf_home": cache_root / "huggingface",
+        "hf_hub": cache_root / "huggingface" / "hub",
+        "models": cache_root / "models",
+        "temp": cache_root / "temp",
+        "audio": cache_root / "audio",
+    }
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+
+    os.environ["HF_HOME"] = str(dirs["hf_home"])
+    os.environ["HF_HUB_CACHE"] = str(dirs["hf_hub"])
+    os.environ["HUGGINGFACE_HUB_CACHE"] = str(dirs["hf_hub"])
+    os.environ["TRANSFORMERS_CACHE"] = str(dirs["hf_home"] / "transformers")
+    os.environ["XDG_CACHE_HOME"] = str(dirs["cache"])
+    os.environ["TMP"] = str(dirs["temp"])
+    os.environ["TEMP"] = str(dirs["temp"])
+    tempfile.tempdir = str(dirs["temp"])
+
+    retention_minutes = max(0.0, min(60.0, float(config.get("cache_retention_minutes", DEFAULT_CONFIG["cache_retention_minutes"]))))
+    cleanup_old_files(dirs["audio"], retention_minutes * 60.0)
+    cleanup_old_files(dirs["temp"], retention_minutes * 60.0)
+    return dirs
 
 
 def ensure_cuda_dll_path() -> None:
@@ -112,6 +172,7 @@ def migrate_config(user_config: dict) -> dict:
         config["record_threshold"] = config["rms_threshold"]
     config["rms_threshold"] = config.get("record_threshold", DEFAULT_CONFIG["record_threshold"])
     config["transcribe_threshold"] = max(float(config["record_threshold"]), float(config["transcribe_threshold"]))
+    config["cache_retention_minutes"] = max(0.0, min(60.0, float(config.get("cache_retention_minutes", DEFAULT_CONFIG["cache_retention_minutes"]))))
     return config
 
 
@@ -331,12 +392,14 @@ def collect_phrases(config: dict, stop_event: threading.Event) -> queue.Queue[Ph
 
 
 def transcribe_loop(config: dict) -> None:
-    output_dir = Path(config["output_dir"]).resolve()
+    storage_dirs = configure_local_storage(config)
+    output_dir = app_path(str(config["output_dir"])).resolve()
     print("Loading Whisper model...")
     model = WhisperModel(
         config["model"],
         device=config["device"],
         compute_type=config["compute_type"],
+        download_root=str(storage_dirs["models"]),
     )
     language = config.get("language_mode", config.get("language", "zh"))
     if language in {"auto", "", None}:
@@ -345,6 +408,7 @@ def transcribe_loop(config: dict) -> None:
     stop_event = threading.Event()
     phrases = collect_phrases(config, stop_event)
     print(f"Writing transcript to: {output_dir}")
+    print(f"Using local cache: {storage_dirs['cache']}")
 
     while not stop_event.is_set():
         try:
