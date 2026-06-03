@@ -46,6 +46,17 @@ cd C:\Data\CottonProject\FenneNote
 .\run.ps1
 ```
 
+## 打包为 EXE
+
+如果希望任务管理器和资源管理器显示 FenneNote 图标，可以打包为 Windows exe：
+
+```powershell
+.\build_windows.ps1
+.\dist\FenneNote\FenneNote.exe
+```
+
+`dist/` 和 `build/` 默认不会上传到 GitHub。打包后的 `FenneNote.exe` 已内嵌 `assets/fennenote.ico`。
+
 ## 推荐配置
 
 默认配置偏向 Unity 同时运行时的性能：

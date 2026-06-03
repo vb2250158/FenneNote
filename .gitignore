@@ -5,3 +5,6 @@ transcripts/
 __pycache__/
 *.pyc
 reference-cache/
+build/
+dist/
+*.spec

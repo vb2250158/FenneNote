@@ -15,14 +15,17 @@ from tkinter import messagebox, ttk
 import numpy as np
 import sounddevice as sd
 
-from transcribe_mic import DEFAULT_CONFIG, load_config, save_config as write_config, today_output_path
+from transcribe_mic import DEFAULT_CONFIG, load_config, main as transcribe_cli_main, save_config as write_config, today_output_path
 
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 CONFIG_PATH = APP_DIR / "config.json"
-ICON_PATH = APP_DIR / "assets" / "fennenote.ico"
-ICON_PNG_PATH = APP_DIR / "assets" / "fennec-ear-icon.png"
-BUDDY_IMAGE_PATH = APP_DIR / "assets" / "fennenote-listening-buddy.png"
+CONFIG_EXAMPLE_PATH = APP_DIR / "config.example.json"
+BUNDLED_CONFIG_EXAMPLE_PATH = RESOURCE_DIR / "config.example.json"
+ICON_PATH = RESOURCE_DIR / "assets" / "fennenote.ico"
+ICON_PNG_PATH = RESOURCE_DIR / "assets" / "fennec-ear-icon.png"
+BUDDY_IMAGE_PATH = RESOURCE_DIR / "assets" / "fennenote-listening-buddy.png"
 CUDA_DLL_DIRS = [
     Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin"),
     Path(r"C:\Program Files\NVIDIA Corporation\NVIDIA Canvas"),
@@ -69,6 +72,15 @@ def ensure_cuda_dll_path() -> None:
             pass
 
 
+def ensure_bundled_config_template() -> None:
+    if CONFIG_EXAMPLE_PATH.exists() or not BUNDLED_CONFIG_EXAMPLE_PATH.exists():
+        return
+    try:
+        CONFIG_EXAMPLE_PATH.write_text(BUNDLED_CONFIG_EXAMPLE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    except OSError:
+        pass
+
+
 class TranscriberGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -92,6 +104,7 @@ class TranscriberGui(tk.Tk):
         self.tail_position = 0
         self.is_paused = False
 
+        ensure_bundled_config_template()
         self.config_data = load_config(CONFIG_PATH)
         self.devices = self.list_input_devices()
         self.vars = self.create_vars()
@@ -564,7 +577,10 @@ class TranscriberGui(tk.Tk):
         self.tail_position = 0
         self.show_placeholder()
 
-        command = [sys.executable, str(APP_DIR / "transcribe_mic.py"), "--config", str(CONFIG_PATH)]
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--transcribe-child", "--config", str(CONFIG_PATH)]
+        else:
+            command = [sys.executable, str(APP_DIR / "transcribe_mic.py"), "--config", str(CONFIG_PATH)]
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         child_env = os.environ.copy()
@@ -696,6 +712,9 @@ class TranscriberGui(tk.Tk):
 
 
 def main() -> int:
+    if "--transcribe-child" in sys.argv:
+        sys.argv.remove("--transcribe-child")
+        return transcribe_cli_main()
     ensure_cuda_dll_path()
     app = TranscriberGui()
     app.mainloop()
