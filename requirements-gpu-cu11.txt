@@ -1,0 +1,11 @@
+ctranslate2==3.24.0
+numpy==1.26.4
+opencc==1.1.9
+sounddevice==0.5.1
+av==12.3.0
+tokenizers==0.15.2
+huggingface-hub==0.36.2
+onnxruntime==1.23.2
+tqdm==4.67.3
+pyyaml==6.0.3
+cffi==2.0.0

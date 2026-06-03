@@ -1,0 +1,616 @@
+from __future__ import annotations
+
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+from collections import deque
+from pathlib import Path
+from tkinter import messagebox, ttk
+
+import numpy as np
+import sounddevice as sd
+
+from transcribe_mic import DEFAULT_CONFIG, load_config, save_config as write_config, today_output_path
+
+
+APP_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = APP_DIR / "config.json"
+CUDA_DLL_DIRS = [
+    Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin"),
+    Path(r"C:\Program Files\NVIDIA Corporation\NVIDIA Canvas"),
+]
+
+LANGUAGE_LABELS = {
+    "auto": "自动识别",
+    "zh": "简体中文",
+    "en": "英文",
+    "ja": "日文",
+    "ko": "韩文",
+}
+LANGUAGE_CODES = {label: code for code, label in LANGUAGE_LABELS.items()}
+
+
+def ensure_cuda_dll_path() -> None:
+    paths = [str(path) for path in CUDA_DLL_DIRS if path.exists()]
+    if not paths:
+        return
+    os.environ["PATH"] = ";".join(paths + [os.environ.get("PATH", "")])
+    for path in paths:
+        try:
+            os.add_dll_directory(path)
+        except (AttributeError, OSError):
+            pass
+
+
+class TranscriberGui(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("FenneNote - 芬妮笔记")
+        self.geometry("980x680")
+        self.minsize(860, 560)
+
+        self.process: subprocess.Popen[str] | None = None
+        self.output_queue: queue.Queue[str] = queue.Queue()
+        self.level_queue: queue.Queue[tuple[float, float]] = queue.Queue()
+        self.level_stream: sd.InputStream | None = None
+        self.preview_noise_floor = 0.003
+        self.level_history: deque[float] = deque(maxlen=160)
+        self.raw_level_history: deque[float] = deque(maxlen=160)
+        self.bar_history: deque[float] = deque(maxlen=96)
+        self.preview_triggered = False
+        self.last_trigger_time = 0.0
+        self.display_level = 0.0
+        self.display_raw_level = 0.0
+        self.tail_position = 0
+        self.is_paused = False
+
+        self.config_data = load_config(CONFIG_PATH)
+        self.devices = self.list_input_devices()
+        self.vars = self.create_vars()
+
+        self.setup_style()
+        self.build_ui()
+        self.start_level_monitor()
+        self.refresh_tail(reset=True)
+        self.after(150, self.drain_process_output)
+        self.after(80, self.drain_level_preview)
+        if bool(self.config_data.get("auto_start", False)):
+            self.after(700, self.start_transcriber)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def create_vars(self) -> dict[str, tk.Variable]:
+        device_index = self.config_data.get("mic_device")
+        language_code = self.config_data.get("language_mode", self.config_data.get("language", "zh"))
+        return {
+            "model": tk.StringVar(value=str(self.config_data.get("model", "small"))),
+            "device": tk.StringVar(value="cuda"),
+            "compute_type": tk.StringVar(value=str(self.config_data.get("compute_type", "int8_float16"))),
+            "language": tk.StringVar(value=LANGUAGE_LABELS.get(str(language_code), "简体中文")),
+            "simplify_chinese": tk.BooleanVar(value=bool(self.config_data.get("simplify_chinese", True))),
+            "input_gain": tk.DoubleVar(value=float(self.config_data.get("input_gain", 8.0))),
+            "record_threshold": tk.DoubleVar(value=float(self.config_data.get("record_threshold", self.config_data.get("rms_threshold", 0.01)))),
+            "transcribe_threshold": tk.DoubleVar(value=float(self.config_data.get("transcribe_threshold", 0.015))),
+            "adaptive_threshold": tk.BooleanVar(value=bool(self.config_data.get("adaptive_threshold", True))),
+            "pre_roll_seconds": tk.DoubleVar(value=float(self.config_data.get("pre_roll_seconds", 1.5))),
+            "transcribe_pause_seconds": tk.DoubleVar(value=float(self.config_data.get("transcribe_pause_seconds", 0.5))),
+            "silence_seconds": tk.DoubleVar(value=float(self.config_data.get("silence_seconds", 1.2))),
+            "max_phrase_seconds": tk.DoubleVar(value=float(self.config_data.get("max_phrase_seconds", 12.0))),
+            "mic_device": tk.StringVar(value=self.device_label_for(device_index)),
+            "mic_level": tk.DoubleVar(value=0.0),
+            "mic_level_text": tk.StringVar(value="原始 0.000 / 增益后 0.000 / 录音 0.010 / 转写 0.015"),
+            "trigger_state": tk.StringVar(value="状态：监听中"),
+            "status": tk.StringVar(value="就绪"),
+            "auto_start": tk.BooleanVar(value=bool(self.config_data.get("auto_start", False))),
+        }
+
+    def setup_style(self) -> None:
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        self.configure(bg="#f4f5f7")
+        style.configure(".", font=("Microsoft YaHei UI", 9))
+        style.configure("TFrame", background="#f4f5f7")
+        style.configure("Panel.TFrame", background="#ffffff")
+        style.configure("TLabel", background="#f4f5f7", foreground="#222222")
+        style.configure("Title.TLabel", background="#ffffff", foreground="#111111", font=("Microsoft YaHei UI", 12, "bold"))
+        style.configure("Muted.TLabel", background="#ffffff", foreground="#666666")
+        style.configure("Status.TLabel", background="#ffffff", foreground="#0a8f3c", font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("TLabelframe", background="#ffffff", bordercolor="#d6d8dc")
+        style.configure("TLabelframe.Label", background="#ffffff", foreground="#111111", font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("TButton", padding=(12, 5))
+        style.configure("Primary.TButton", padding=(16, 6))
+
+    def build_ui(self) -> None:
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        toolbar = ttk.Frame(self, padding=(14, 10), style="Panel.TFrame")
+        toolbar.grid(row=0, column=0, sticky="ew")
+        toolbar.columnconfigure(6, weight=1)
+
+        self.start_button = ttk.Button(toolbar, text="开始", command=self.start_transcriber, style="Primary.TButton")
+        self.start_button.grid(row=0, column=0, padx=(0, 8))
+        self.pause_button = ttk.Button(toolbar, text="暂停", command=self.toggle_pause, state="disabled")
+        self.pause_button.grid(row=0, column=1, padx=(0, 8))
+        self.stop_button = ttk.Button(toolbar, text="停止", command=self.stop_transcriber, state="disabled")
+        self.stop_button.grid(row=0, column=2, padx=(0, 16))
+        ttk.Button(toolbar, text="保存配置", command=self.save_config).grid(row=0, column=3, padx=(0, 8))
+        ttk.Button(toolbar, text="打开目录", command=self.open_output_folder).grid(row=0, column=4, padx=(0, 16))
+        ttk.Label(toolbar, textvariable=self.vars["status"]).grid(row=0, column=6, sticky="e")
+
+        main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        main.grid(row=1, column=0, sticky="nsew", padx=14, pady=14)
+
+        settings_shell = ttk.Frame(main, padding=0, style="Panel.TFrame")
+        settings_shell.rowconfigure(0, weight=1)
+        settings_shell.columnconfigure(0, weight=1)
+        settings_canvas = tk.Canvas(settings_shell, width=360, bg="#ffffff", highlightthickness=0)
+        settings_scrollbar = ttk.Scrollbar(settings_shell, orient="vertical", command=settings_canvas.yview)
+        settings_canvas.grid(row=0, column=0, sticky="nsew")
+        settings_scrollbar.grid(row=0, column=1, sticky="ns")
+        settings = ttk.Frame(settings_canvas, padding=14, style="Panel.TFrame")
+        settings.columnconfigure(0, weight=1)
+        settings_window = settings_canvas.create_window((0, 0), window=settings, anchor="nw")
+        settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
+        settings.bind("<Configure>", lambda _event: settings_canvas.configure(scrollregion=settings_canvas.bbox("all")))
+        settings_canvas.bind("<Configure>", lambda event: settings_canvas.itemconfigure(settings_window, width=event.width))
+        main.add(settings_shell, weight=0)
+
+        input_group = ttk.LabelFrame(settings, text="输入与模型", padding=12)
+        input_group.grid(row=0, column=0, sticky="ew")
+        input_group.columnconfigure(1, weight=1)
+        row = 0
+        mic_combo, row = self.add_combo(input_group, row, "麦克风", "mic_device", [self.device_label_for(None)] + [label for _, label in self.devices])
+        mic_combo.bind("<<ComboboxSelected>>", lambda _event: self.restart_level_monitor())
+        _combo, row = self.add_combo(input_group, row, "模型", "model", ["small", "medium", "large-v3", "distil-large-v3"])
+        ttk.Label(input_group, text="运行设备").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Label(input_group, text="GPU / CUDA").grid(row=row, column=1, sticky="w", pady=5)
+        row += 1
+        _combo, row = self.add_combo(input_group, row, "计算精度", "compute_type", ["int8_float16", "float16", "int8", "int8_float32", "float32"])
+        _combo, row = self.add_combo(input_group, row, "语言", "language", list(LANGUAGE_CODES.keys()))
+        ttk.Label(input_group, text="文字转换").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Checkbutton(input_group, text="输出简体中文", variable=self.vars["simplify_chinese"]).grid(row=row, column=1, sticky="w", pady=5)
+
+        trigger_group = ttk.LabelFrame(settings, text="触发与分段", padding=12)
+        trigger_group.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        trigger_group.columnconfigure(1, weight=1)
+        row = 0
+        ttk.Label(trigger_group, text="触发模式").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Checkbutton(trigger_group, text="动态识别环境底噪", variable=self.vars["adaptive_threshold"]).grid(row=row, column=1, sticky="w", pady=5)
+        row += 1
+        row = self.add_slider(trigger_group, row, "麦克风增益", "input_gain", 1.0, 20.0, 1.0)
+        row = self.add_slider(trigger_group, row, "录音触发阈值", "record_threshold", 0.01, 0.04, 0.001)
+        row = self.add_slider(trigger_group, row, "转写判定阈值", "transcribe_threshold", 0.01, 0.06, 0.001)
+        row = self.add_slider(trigger_group, row, "触发前保留秒数", "pre_roll_seconds", 0.0, 3.0, 0.1)
+        row = self.add_slider(trigger_group, row, "低于转写线等待秒数", "transcribe_pause_seconds", 0.2, 2.0, 0.1)
+        row = self.add_slider(trigger_group, row, "噪声丢弃等待秒数", "silence_seconds", 1.0, 8.0, 0.1)
+        row = self.add_slider(trigger_group, row, "最长分段秒数", "max_phrase_seconds", 10.0, 120.0, 1.0)
+
+        presets = ttk.LabelFrame(settings, text="办公室预设", padding=12)
+        presets.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        presets.columnconfigure((0, 1, 2), weight=1)
+        ttk.Button(presets, text="灵敏", command=lambda: self.set_thresholds(0.010, 0.015)).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(presets, text="办公室", command=lambda: self.set_thresholds(0.020, 0.030)).grid(row=0, column=1, sticky="ew", padx=3)
+        ttk.Button(presets, text="严格", command=lambda: self.set_thresholds(0.040, 0.050)).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
+        app_group = ttk.LabelFrame(settings, text="启动行为", padding=12)
+        app_group.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        ttk.Checkbutton(app_group, text="启动后自动开始", variable=self.vars["auto_start"]).grid(row=0, column=0, sticky="w")
+
+        right = ttk.Frame(main, padding=0, style="Panel.TFrame")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+        main.add(right, weight=1)
+
+        monitor = ttk.Frame(right, padding=14, style="Panel.TFrame")
+        monitor.grid(row=0, column=0, sticky="ew")
+        monitor.columnconfigure(0, weight=1)
+        ttk.Label(monitor, text="实时监测", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(monitor, textvariable=self.vars["trigger_state"], style="Status.TLabel").grid(row=0, column=1, sticky="e")
+        meter = ttk.Frame(monitor, style="Panel.TFrame")
+        meter.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 6))
+        meter.columnconfigure(0, weight=1)
+        self.level_bar = ttk.Progressbar(meter, variable=self.vars["mic_level"], maximum=0.04)
+        self.level_bar.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        ttk.Label(meter, textvariable=self.vars["mic_level_text"], style="Muted.TLabel").grid(row=0, column=1, sticky="e")
+        self.wave_canvas = tk.Canvas(monitor, height=126, bg="#ffffff", highlightthickness=1, highlightbackground="#d6d8dc")
+        self.wave_canvas.grid(row=2, column=0, columnspan=2, sticky="ew")
+
+        transcript_frame = ttk.Frame(right, padding=(14, 0, 14, 14), style="Panel.TFrame")
+        transcript_frame.grid(row=1, column=0, sticky="nsew")
+        transcript_frame.columnconfigure(0, weight=1)
+        transcript_frame.rowconfigure(1, weight=1)
+
+        preview_header = ttk.Frame(transcript_frame, padding=(0, 14, 0, 8), style="Panel.TFrame")
+        preview_header.grid(row=0, column=0, columnspan=2, sticky="ew")
+        preview_header.columnconfigure(0, weight=1)
+        ttk.Label(preview_header, text="转写预览", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(preview_header, text="清空预览", command=self.clear_preview).grid(row=0, column=1, sticky="e")
+
+        self.transcript = tk.Text(transcript_frame, wrap="word", undo=False)
+        self.transcript.grid(row=1, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(transcript_frame, orient="vertical", command=self.transcript.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        self.transcript.configure(yscrollcommand=scrollbar.set)
+        self.transcript.tag_configure("placeholder", foreground="#777777")
+        self.transcript.tag_configure("log", foreground="#666666")
+        self.transcript.tag_configure("text", foreground="#111111")
+        self.show_placeholder()
+
+    def add_combo(self, parent: ttk.Frame, row: int, label: str, key: str, values: list[str]) -> tuple[ttk.Combobox, int]:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        combo = ttk.Combobox(parent, textvariable=self.vars[key], values=values, state="readonly", width=32)
+        combo.grid(row=row, column=1, sticky="ew", pady=5)
+        return combo, row + 1
+
+    def add_entry(self, parent: ttk.Frame, row: int, label: str, key: str) -> int:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Entry(parent, textvariable=self.vars[key]).grid(row=row, column=1, sticky="ew", pady=5)
+        return row + 1
+
+    def add_slider(self, parent: ttk.Frame, row: int, label: str, key: str, start: float, end: float, step: float) -> int:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        holder = ttk.Frame(parent)
+        holder.grid(row=row, column=1, sticky="ew", pady=5)
+        holder.columnconfigure(0, weight=1)
+        ttk.Scale(holder, variable=self.vars[key], from_=start, to=end).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Label(holder, textvariable=self.vars[key], width=8).grid(row=0, column=1)
+        return row + 1
+
+    def set_threshold(self, value: float) -> None:
+        self.vars["record_threshold"].set(value)
+        self.vars["transcribe_threshold"].set(max(value, float(self.vars["transcribe_threshold"].get())))
+        self.update_level_text(float(self.vars["mic_level"].get()))
+
+    def set_thresholds(self, record_threshold: float, transcribe_threshold: float) -> None:
+        self.vars["record_threshold"].set(record_threshold)
+        self.vars["transcribe_threshold"].set(max(record_threshold, transcribe_threshold))
+        self.update_level_text(float(self.vars["mic_level"].get()))
+
+    def update_level_text(self, level: float, raw_level: float | None = None) -> None:
+        record_threshold = self.current_preview_threshold()
+        transcribe_threshold = float(self.vars["transcribe_threshold"].get())
+        peak = max(self.level_history) if self.level_history else level
+        raw = level if raw_level is None else raw_level
+        self.vars["mic_level_text"].set(f"原始 {raw:.3f} / 增益后 {level:.3f} / 录音 {record_threshold:.3f} / 转写 {transcribe_threshold:.3f} / 峰值 {peak:.3f}")
+
+    def current_preview_threshold(self) -> float:
+        min_threshold = float(self.vars["record_threshold"].get())
+        if not bool(self.vars["adaptive_threshold"].get()):
+            return min_threshold
+        multiplier = float(self.config_data.get("adaptive_threshold_multiplier", DEFAULT_CONFIG.get("adaptive_threshold_multiplier", 2.5)))
+        margin = float(self.config_data.get("adaptive_threshold_margin", DEFAULT_CONFIG.get("adaptive_threshold_margin", 0.004)))
+        return max(min_threshold, self.preview_noise_floor * multiplier + margin)
+
+    def start_level_monitor(self) -> None:
+        self.stop_level_monitor()
+        device = self.selected_device_index()
+        sample_rate = int(self.config_data.get("sample_rate", DEFAULT_CONFIG["sample_rate"]))
+        blocksize = max(512, int(sample_rate * 0.08))
+
+        def callback(indata, frames, callback_time, status):
+            if status:
+                return
+            raw_samples = indata[:, 0].astype(np.float32)
+            raw_level = float(np.sqrt(np.mean(np.square(raw_samples)))) if raw_samples.size else 0.0
+            samples = raw_samples
+            gain = float(self.vars["input_gain"].get())
+            if gain != 1.0:
+                samples = np.clip(samples * gain, -1.0, 1.0)
+            level = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+            self.level_queue.put((level, raw_level))
+
+        try:
+            self.level_stream = sd.InputStream(
+                device=device,
+                channels=1,
+                samplerate=sample_rate,
+                blocksize=blocksize,
+                dtype="float32",
+                callback=callback,
+            )
+            self.level_stream.start()
+        except Exception as exc:
+            self.level_stream = None
+            self.vars["status"].set(f"音量预览启动失败：{exc}")
+
+    def stop_level_monitor(self) -> None:
+        if self.level_stream is None:
+            return
+        try:
+            self.level_stream.stop()
+            self.level_stream.close()
+        except Exception:
+            pass
+        self.level_stream = None
+
+    def restart_level_monitor(self) -> None:
+        self.start_level_monitor()
+        self.vars["status"].set("已切换麦克风")
+
+    def drain_level_preview(self) -> None:
+        latest: float | None = None
+        latest_raw: float | None = None
+        while not self.level_queue.empty():
+            latest, latest_raw = self.level_queue.get_nowait()
+        if latest is not None:
+            latest_raw = latest_raw or 0.0
+            self.display_level = (self.display_level * 0.75) + (latest * 0.25)
+            self.display_raw_level = (self.display_raw_level * 0.75) + (latest_raw * 0.25)
+            threshold = self.current_preview_threshold()
+            transcribe_threshold = float(self.vars["transcribe_threshold"].get())
+            if latest < threshold:
+                self.preview_noise_floor = (self.preview_noise_floor * 0.95) + (latest * 0.05)
+            now = time.monotonic()
+            if latest >= threshold:
+                self.preview_triggered = True
+                self.last_trigger_time = now
+            elif self.preview_triggered and (now - self.last_trigger_time) >= float(self.vars["silence_seconds"].get()):
+                self.preview_triggered = False
+
+            self.level_history.append(self.display_level)
+            self.raw_level_history.append(self.display_raw_level)
+            self.bar_history.append(self.display_level)
+            max_scale = max(0.04, threshold, transcribe_threshold, max(self.level_history, default=0.0)) * 1.15
+            self.level_bar.configure(maximum=max_scale)
+            shown = min(self.display_level, max_scale)
+            self.vars["mic_level"].set(shown)
+            if self.preview_triggered:
+                state = "状态：录音中，已达到转写条件" if max(self.level_history, default=0.0) >= transcribe_threshold else "状态：录音中，等待达到转写条件"
+            else:
+                state = "状态：监听中，等待超过录音阈值"
+            self.vars["trigger_state"].set(state)
+            self.update_level_text(self.display_level, self.display_raw_level)
+            self.draw_scrolling_bars(max_scale, threshold, transcribe_threshold)
+        else:
+            self.update_level_text(float(self.vars["mic_level"].get()), self.raw_level_history[-1] if self.raw_level_history else None)
+        self.after(80, self.drain_level_preview)
+
+    def draw_scrolling_bars(self, max_scale: float, record_threshold: float, transcribe_threshold: float) -> None:
+        canvas = self.wave_canvas
+        width = max(canvas.winfo_width(), 1)
+        height = max(canvas.winfo_height(), 1)
+        canvas.delete("all")
+        record_y = height - min(record_threshold / max_scale, 1.0) * height
+        transcribe_y = height - min(transcribe_threshold / max_scale, 1.0) * height
+        canvas.create_line(0, record_y, width, record_y, fill="#d23f31", width=2)
+        record_label_y = max(10, min(height - 10, record_y - 8))
+        transcribe_label_y = max(10, min(height - 10, transcribe_y - 8))
+        if abs(record_label_y - transcribe_label_y) < 14:
+            record_label_y = max(10, record_label_y - 8)
+            transcribe_label_y = min(height - 10, transcribe_label_y + 8)
+        canvas.create_text(4, record_label_y, text="录音线", anchor="w", fill="#d23f31")
+        canvas.create_line(0, transcribe_y, width, transcribe_y, fill="#e08a00", width=2, dash=(4, 3))
+        canvas.create_text(width - 4, transcribe_label_y, text="转写线", anchor="e", fill="#e08a00")
+        values = list(self.bar_history)
+        if not values:
+            return
+        gap = 3
+        bar_width = 4
+        max_bars = max(1, int(width // (bar_width + gap)))
+        values = values[-max_bars:]
+        if len(values) < max_bars:
+            values = [0.0] * (max_bars - len(values)) + values
+        for index, value in enumerate(values):
+            x0 = index * (bar_width + gap)
+            x1 = x0 + bar_width
+            normalized = min(value / max_scale, 1.0)
+            bar_height = max(2.0, normalized * (height - 8)) if value > 0 else 0
+            y0 = height - bar_height
+            color = "#2a2a2a" if value < record_threshold else "#0a8f3c"
+            if value >= transcribe_threshold:
+                color = "#19b85a"
+            canvas.create_rectangle(x0, y0, x1, height, fill=color, outline="")
+
+    def list_input_devices(self) -> list[tuple[int, str]]:
+        devices: list[tuple[int, str]] = []
+        for index, device in enumerate(sd.query_devices()):
+            if int(device.get("max_input_channels", 0)) > 0:
+                host_api = sd.query_hostapis(device["hostapi"])["name"]
+                devices.append((index, f"{index}: {device['name']} ({host_api})"))
+        return devices
+
+    def device_label_for(self, index: int | None) -> str:
+        if index is None:
+            return "系统默认麦克风"
+        for device_index, label in getattr(self, "devices", []):
+            if device_index == index:
+                return label
+        return f"{index}: 未知设备"
+
+    def selected_device_index(self) -> int | None:
+        label = self.vars["mic_device"].get()
+        if label == "系统默认麦克风":
+            return None
+        try:
+            return int(label.split(":", 1)[0])
+        except ValueError:
+            return None
+
+    def collect_config(self) -> dict:
+        config = DEFAULT_CONFIG.copy()
+        config.update(load_config(CONFIG_PATH))
+        config.update(
+            {
+                "model": self.vars["model"].get(),
+                "auto_start": bool(self.vars["auto_start"].get()),
+                "device": "cuda",
+                "compute_type": self.vars["compute_type"].get(),
+                "language": LANGUAGE_CODES.get(self.vars["language"].get(), "zh"),
+                "language_mode": LANGUAGE_CODES.get(self.vars["language"].get(), "zh"),
+                "simplify_chinese": bool(self.vars["simplify_chinese"].get()),
+                "adaptive_threshold": bool(self.vars["adaptive_threshold"].get()),
+                "input_gain": round(float(self.vars["input_gain"].get()), 1),
+                "record_threshold": round(float(self.vars["record_threshold"].get()), 4),
+                "transcribe_threshold": round(max(float(self.vars["record_threshold"].get()), float(self.vars["transcribe_threshold"].get())), 4),
+                "rms_threshold": round(float(self.vars["record_threshold"].get()), 4),
+                "pre_roll_seconds": round(float(self.vars["pre_roll_seconds"].get()), 1),
+                "transcribe_pause_seconds": round(float(self.vars["transcribe_pause_seconds"].get()), 1),
+                "silence_seconds": round(float(self.vars["silence_seconds"].get()), 2),
+                "max_phrase_seconds": round(float(self.vars["max_phrase_seconds"].get()), 1),
+                "mic_device": self.selected_device_index(),
+            }
+        )
+        return config
+
+    def save_config(self) -> None:
+        config = self.collect_config()
+        write_config(CONFIG_PATH, config)
+        self.config_data = config
+        self.vars["status"].set("配置已保存")
+
+    def start_transcriber(self) -> None:
+        if self.process and self.process.poll() is None:
+            return
+        self.save_config()
+        self.is_paused = False
+        self.tail_position = 0
+        self.show_placeholder()
+
+        command = [sys.executable, str(APP_DIR / "transcribe_mic.py"), "--config", str(CONFIG_PATH)]
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        child_env = os.environ.copy()
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"
+        self.process = subprocess.Popen(
+            command,
+            cwd=str(APP_DIR),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            startupinfo=startupinfo,
+            env=child_env,
+        )
+        threading.Thread(target=self.read_process_output, daemon=True).start()
+        self.start_button.configure(state="disabled")
+        self.pause_button.configure(state="normal", text="暂停")
+        self.stop_button.configure(state="normal")
+        self.vars["status"].set("正在启动")
+
+    def read_process_output(self) -> None:
+        assert self.process and self.process.stdout
+        for line in self.process.stdout:
+            self.output_queue.put(line)
+        self.output_queue.put("__PROCESS_EXITED__")
+
+    def drain_process_output(self) -> None:
+        while not self.output_queue.empty():
+            line = self.output_queue.get_nowait()
+            if line == "__PROCESS_EXITED__":
+                self.start_button.configure(state="normal")
+                self.pause_button.configure(state="disabled")
+                self.stop_button.configure(state="disabled")
+                self.vars["status"].set("已停止")
+            elif line.startswith("["):
+                self.append_text(line)
+            else:
+                status = line.strip()[:90] or "运行中"
+                if "cublas64_12.dll" in line or "Library cublas64" in line:
+                    status = "CUDA 运行库缺失，已停止。请使用 run_gui.ps1 创建 GPU 环境，或安装匹配的 CUDA/cuDNN。"
+                self.vars["status"].set(status)
+                if status:
+                    self.append_log(status)
+        self.after(150, self.drain_process_output)
+
+    def append_text(self, line: str) -> None:
+        self.clear_placeholder()
+        self.transcript.insert(tk.END, line, "text")
+        self.transcript.see(tk.END)
+
+    def append_log(self, line: str) -> None:
+        self.clear_placeholder()
+        self.transcript.insert(tk.END, f"系统：{line.strip()}\n", "log")
+        self.transcript.see(tk.END)
+
+    def show_placeholder(self) -> None:
+        self.transcript.delete("1.0", tk.END)
+        self.transcript.insert(
+            tk.END,
+            "点击左上角“开始”后，说话内容会显示在这里。\n"
+            "如果音量条有波动但没有文字，通常是触发阈值过高、说话时间太短，或模型仍在加载。\n",
+            "placeholder",
+        )
+
+    def clear_placeholder(self) -> None:
+        if self.transcript.tag_ranges("placeholder"):
+            self.transcript.delete("1.0", tk.END)
+
+    def clear_preview(self) -> None:
+        self.show_placeholder()
+
+    def toggle_pause(self) -> None:
+        if not self.process or not self.process.stdin or self.process.poll() is not None:
+            return
+        command = "r\n" if self.is_paused else "p\n"
+        self.process.stdin.write(command)
+        self.process.stdin.flush()
+        self.is_paused = not self.is_paused
+        self.pause_button.configure(text="继续" if self.is_paused else "暂停")
+        self.vars["status"].set("已暂停" if self.is_paused else "运行中")
+
+    def stop_transcriber(self) -> None:
+        if not self.process or self.process.poll() is not None:
+            return
+        try:
+            if self.process.stdin:
+                self.process.stdin.write("q\n")
+                self.process.stdin.flush()
+            self.process.wait(timeout=5)
+        except Exception:
+            self.process.terminate()
+        self.start_button.configure(state="normal")
+        self.pause_button.configure(state="disabled")
+        self.stop_button.configure(state="disabled")
+        self.vars["status"].set("已停止")
+
+    def refresh_tail(self, reset: bool = False) -> None:
+        if reset:
+            self.tail_position = 0
+        try:
+            path = today_output_path((APP_DIR / str(self.collect_config()["output_dir"])).resolve())
+            if path.exists():
+                with path.open("r", encoding="utf-8") as handle:
+                    handle.seek(self.tail_position)
+                    data = handle.read()
+                    self.tail_position = handle.tell()
+                if data and (not self.process or self.process.poll() is not None):
+                    self.append_text(data)
+        except Exception:
+            pass
+        self.after(1000, self.refresh_tail)
+
+    def open_output_folder(self) -> None:
+        output_dir = (APP_DIR / str(self.collect_config()["output_dir"])).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(["explorer", str(output_dir)])
+
+    def on_close(self) -> None:
+        if self.process and self.process.poll() is None:
+            if not messagebox.askyesno("实时语音转文字", "停止转写并关闭窗口吗？"):
+                return
+            self.stop_transcriber()
+        self.stop_level_monitor()
+        self.destroy()
+
+
+def main() -> int:
+    ensure_cuda_dll_path()
+    app = TranscriberGui()
+    app.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
