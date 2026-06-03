@@ -113,6 +113,8 @@ def configure_local_storage(config: dict | None = None) -> dict[str, Path]:
     os.environ["HF_HOME"] = str(dirs["hf_home"])
     os.environ["HF_HUB_CACHE"] = str(dirs["hf_hub"])
     os.environ["HUGGINGFACE_HUB_CACHE"] = str(dirs["hf_hub"])
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
+    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     os.environ["TRANSFORMERS_CACHE"] = str(dirs["hf_home"] / "transformers")
     os.environ["XDG_CACHE_HOME"] = str(dirs["cache"])
     os.environ["TMP"] = str(dirs["temp"])
@@ -142,6 +144,11 @@ class Phrase:
     audio: np.ndarray
     started_at: datetime
     ended_at: datetime
+    peak: float
+
+
+def emit_status(code: str, message: str) -> None:
+    print(f"FN_STATUS|{code}|{message}", flush=True)
 
 
 def load_config(path: Path) -> dict:
@@ -384,7 +391,9 @@ def collect_phrases(config: dict, stop_event: threading.Event) -> queue.Queue[Ph
                 if phrase_done or phrase_stale_noise or phrase_too_long:
                     audio = np.concatenate(buffer).astype(np.float32)
                     if phrase_peak >= transcribe_threshold:
-                        phrases.put(Phrase(audio=audio, started_at=started_at, ended_at=datetime.now()))
+                        ended_at = datetime.now()
+                        phrases.put(Phrase(audio=audio, started_at=started_at, ended_at=ended_at, peak=phrase_peak))
+                        emit_status("queued", f"已捕获待转写片段：{(ended_at - started_at).total_seconds():.1f} 秒，峰值 {phrase_peak:.3f}")
                     buffer.clear()
                     started_at = None
                     silence_frames = 0
@@ -401,7 +410,7 @@ def transcribe_loop(config: dict) -> None:
     output_dir = app_path(str(config["output_dir"])).resolve()
     from faster_whisper import WhisperModel
 
-    print("Loading Whisper model...")
+    emit_status("model_loading", f"正在准备模型：{config['model']}（首次运行可能需要下载到本地 cache/models）")
     model = WhisperModel(
         config["model"],
         device=config["device"],
@@ -414,8 +423,9 @@ def transcribe_loop(config: dict) -> None:
     converter = OpenCC("t2s") if bool(config.get("simplify_chinese", True)) else None
     stop_event = threading.Event()
     phrases = collect_phrases(config, stop_event)
-    print(f"Writing transcript to: {output_dir}")
-    print(f"Using local cache: {storage_dirs['cache']}")
+    emit_status("model_ready", f"模型已就绪：{config['model']} / {config['device']} / {config['compute_type']}")
+    emit_status("output_ready", f"写入目录：{output_dir}")
+    emit_status("cache_ready", f"本地缓存：{storage_dirs['cache']}")
 
     while not stop_event.is_set():
         try:
@@ -424,6 +434,7 @@ def transcribe_loop(config: dict) -> None:
             continue
 
         initial_prompt = config.get("initial_prompt") or None
+        emit_status("transcribing", f"正在转写：{(phrase.ended_at - phrase.started_at).total_seconds():.1f} 秒音频，峰值 {phrase.peak:.3f}")
         segments, _info = model.transcribe(
             phrase.audio,
             language=language,
@@ -435,8 +446,10 @@ def transcribe_loop(config: dict) -> None:
         text = "".join(segment.text for segment in segments if should_keep_segment(segment)).strip()
         text = simplify_text(text, converter)
         if not should_keep_text(text, language, config):
+            emit_status("discarded", "本段已转写但没有保留有效文字，已丢弃")
             continue
         append_line(output_dir, phrase.started_at, text)
+        emit_status("written", "转写完成，已写入今日文本")
 
 
 def list_devices() -> None:

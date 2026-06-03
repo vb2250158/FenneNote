@@ -31,6 +31,15 @@ BUDDY_STATE_IMAGE_PATHS = {
     "listening": RESOURCE_DIR / "assets" / "fennenote-state-listening.png",
     "writing": RESOURCE_DIR / "assets" / "fennenote-state-writing.png",
 }
+IGNORED_PROCESS_OUTPUT_MARKERS = (
+    "Xet Storage is enabled",
+    "hf_xet",
+    "huggingface_hub\\file_download.py",
+    "huggingface_hub/file_download.py",
+    "cache-system uses symlinks",
+    "To support symlinks on Windows",
+    "activate Developer Mode",
+)
 CUDA_DLL_DIRS = [
     Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin"),
     Path(r"C:\Program Files\NVIDIA Corporation\NVIDIA Canvas"),
@@ -656,9 +665,13 @@ class TranscriberGui(tk.Tk):
                 self.pause_button.configure(state="disabled")
                 self.stop_button.configure(state="disabled")
                 self.vars["status"].set("已停止")
+            elif line.startswith("FN_STATUS|"):
+                self.handle_worker_status(line)
             elif line.startswith("["):
                 self.append_text(line)
             else:
+                if any(marker in line for marker in IGNORED_PROCESS_OUTPUT_MARKERS):
+                    continue
                 status = line.strip()[:90] or "运行中"
                 if "cublas64_12.dll" in line or "Library cublas64" in line:
                     status = "CUDA 运行库缺失，已停止。请使用 run_gui.ps1 创建 GPU 环境，或安装匹配的 CUDA/cuDNN。"
@@ -666,6 +679,17 @@ class TranscriberGui(tk.Tk):
                 if status:
                     self.append_log(status)
         self.after(150, self.drain_process_output)
+
+    def handle_worker_status(self, line: str) -> None:
+        parts = line.strip().split("|", 2)
+        if len(parts) < 3:
+            return
+        _prefix, code, message = parts
+        self.vars["status"].set(message)
+        if code in {"model_loading", "queued", "transcribing", "discarded"}:
+            self.append_log(message)
+        if code == "transcribing":
+            self.writing_until = time.monotonic() + 2.8
 
     def append_text(self, line: str) -> None:
         self.writing_until = time.monotonic() + 2.8
