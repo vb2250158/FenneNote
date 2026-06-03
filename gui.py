@@ -20,6 +20,8 @@ from transcribe_mic import DEFAULT_CONFIG, load_config, save_config as write_con
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
+ICON_PATH = APP_DIR / "assets" / "fennenote.ico"
+ICON_PNG_PATH = APP_DIR / "assets" / "fennec-ear-icon.png"
 CUDA_DLL_DIRS = [
     Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin"),
     Path(r"C:\Program Files\NVIDIA Corporation\NVIDIA Canvas"),
@@ -51,6 +53,7 @@ class TranscriberGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("FenneNote - 芬妮笔记")
+        self.set_window_icon()
         self.geometry("980x680")
         self.minsize(860, 560)
 
@@ -82,6 +85,17 @@ class TranscriberGui(tk.Tk):
         if bool(self.config_data.get("auto_start", False)):
             self.after(700, self.start_transcriber)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def set_window_icon(self) -> None:
+        try:
+            if ICON_PATH.exists():
+                self.iconbitmap(default=str(ICON_PATH))
+                return
+            if ICON_PNG_PATH.exists():
+                self._window_icon = tk.PhotoImage(file=str(ICON_PNG_PATH))
+                self.iconphoto(True, self._window_icon)
+        except tk.TclError:
+            pass
 
     def create_vars(self) -> dict[str, tk.Variable]:
         device_index = self.config_data.get("mic_device")
