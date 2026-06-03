@@ -18,7 +18,6 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-from faster_whisper import WhisperModel
 from opencc import OpenCC
 
 
@@ -394,6 +393,8 @@ def collect_phrases(config: dict, stop_event: threading.Event) -> queue.Queue[Ph
 def transcribe_loop(config: dict) -> None:
     storage_dirs = configure_local_storage(config)
     output_dir = app_path(str(config["output_dir"])).resolve()
+    from faster_whisper import WhisperModel
+
     print("Loading Whisper model...")
     model = WhisperModel(
         config["model"],

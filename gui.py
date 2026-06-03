@@ -26,6 +26,11 @@ BUNDLED_CONFIG_EXAMPLE_PATH = RESOURCE_DIR / "config.example.json"
 ICON_PATH = RESOURCE_DIR / "assets" / "fennenote.ico"
 ICON_PNG_PATH = RESOURCE_DIR / "assets" / "fennec-ear-icon.png"
 BUDDY_IMAGE_PATH = RESOURCE_DIR / "assets" / "fennenote-listening-buddy.png"
+BUDDY_STATE_IMAGE_PATHS = {
+    "idle": RESOURCE_DIR / "assets" / "fennenote-state-idle.png",
+    "listening": RESOURCE_DIR / "assets" / "fennenote-state-listening.png",
+    "writing": RESOURCE_DIR / "assets" / "fennenote-state-writing.png",
+}
 CUDA_DLL_DIRS = [
     Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin"),
     Path(r"C:\Program Files\NVIDIA Corporation\NVIDIA Canvas"),
@@ -111,6 +116,8 @@ class TranscriberGui(tk.Tk):
         self.display_raw_level = 0.0
         self.tail_position = 0
         self.is_paused = False
+        self.buddy_state = "idle"
+        self.writing_until = 0.0
 
         ensure_bundled_config_template()
         self.config_data = load_config(CONFIG_PATH)
@@ -307,11 +314,19 @@ class TranscriberGui(tk.Tk):
         ttk.Label(meter, textvariable=self.vars["mic_level_text"], style="Muted.TLabel").grid(row=0, column=1, sticky="e")
         self.wave_canvas = tk.Canvas(monitor, height=132, bg=THEME["canvas"], highlightthickness=1, highlightbackground=THEME["line"])
         self.wave_canvas.grid(row=3, column=0, columnspan=2, sticky="ew")
-        if BUDDY_IMAGE_PATH.exists():
+        self.buddy_images: dict[str, tk.PhotoImage] = {}
+        for state, path in BUDDY_STATE_IMAGE_PATHS.items():
+            if not path.exists():
+                continue
             try:
-                self.buddy_image = tk.PhotoImage(file=str(BUDDY_IMAGE_PATH))
+                self.buddy_images[state] = tk.PhotoImage(file=str(path))
             except tk.TclError:
-                self.buddy_image = None
+                pass
+        if not self.buddy_images and BUDDY_IMAGE_PATH.exists():
+            try:
+                self.buddy_images["listening"] = tk.PhotoImage(file=str(BUDDY_IMAGE_PATH))
+            except tk.TclError:
+                pass
 
         transcript_frame = ttk.Frame(right, padding=(14, 0, 14, 14), style="Panel.TFrame")
         transcript_frame.grid(row=1, column=0, sticky="nsew")
@@ -473,11 +488,21 @@ class TranscriberGui(tk.Tk):
             else:
                 state = "状态：监听中，等待超过录音阈值"
             self.vars["trigger_state"].set(state)
+            self.update_buddy_state(latest, threshold)
             self.update_level_text(self.display_level, self.display_raw_level)
             self.draw_scrolling_bars(max_scale, threshold, transcribe_threshold)
         else:
             self.update_level_text(float(self.vars["mic_level"].get()), self.raw_level_history[-1] if self.raw_level_history else None)
         self.after(80, self.drain_level_preview)
+
+    def update_buddy_state(self, latest_level: float, record_threshold: float) -> None:
+        now = time.monotonic()
+        if now < self.writing_until:
+            self.buddy_state = "writing" if int(now * 2.5) % 2 == 0 else "listening"
+        elif latest_level >= record_threshold or self.preview_triggered:
+            self.buddy_state = "listening"
+        else:
+            self.buddy_state = "idle"
 
     def draw_scrolling_bars(self, max_scale: float, record_threshold: float, transcribe_threshold: float) -> None:
         canvas = self.wave_canvas
@@ -520,8 +545,9 @@ class TranscriberGui(tk.Tk):
             canvas.create_rectangle(x0, y0, x1, height, fill=color, outline="")
             if value >= record_threshold:
                 canvas.create_rectangle(x0, max(y0, height - 4), x1, height, fill="#b8f0d8", outline="")
-        if getattr(self, "buddy_image", None):
-            canvas.create_image(width - 92, 64, image=self.buddy_image, anchor="center")
+        buddy_image = self.buddy_images.get(self.buddy_state) or self.buddy_images.get("listening")
+        if buddy_image:
+            canvas.create_image(width - 96, 70, image=buddy_image, anchor="center")
 
     def list_input_devices(self) -> list[tuple[int, str]]:
         devices: list[tuple[int, str]] = []
@@ -642,6 +668,7 @@ class TranscriberGui(tk.Tk):
         self.after(150, self.drain_process_output)
 
     def append_text(self, line: str) -> None:
+        self.writing_until = time.monotonic() + 2.8
         self.clear_placeholder()
         self.transcript.insert(tk.END, line, "text")
         self.transcript.see(tk.END)
