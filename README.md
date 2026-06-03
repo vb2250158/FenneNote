@@ -34,7 +34,7 @@
 ## 启动
 
 ```powershell
-cd C:\Data\CottonProject\GameDevelopmentSkills\voice-transcriber
+cd C:\Data\CottonProject\FenneNote
 .\run_gui.ps1
 ```
 
@@ -95,7 +95,7 @@ GUI 的“启动后自动开始”勾选会写入 `auto_start`。勾选后，下
 转写文本按天保存：
 
 ```text
-voice-transcriber/transcripts/2026-06-03.txt
+transcripts/2026-06-03.txt
 ```
 
 实时查看：

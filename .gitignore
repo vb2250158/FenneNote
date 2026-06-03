@@ -4,3 +4,4 @@ config.json
 transcripts/
 __pycache__/
 *.pyc
+reference-cache/
