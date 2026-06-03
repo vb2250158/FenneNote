@@ -211,6 +211,13 @@ class TranscriberGui(tk.Tk):
         style.map("TCheckbutton", indicatorcolor=[("selected", THEME["teal"]), ("active", THEME["sand"])])
         style.configure("TCombobox", fieldbackground="#fffdf8", background="#fff7e8", foreground=THEME["ink"], arrowcolor=THEME["teal_dark"], bordercolor=THEME["line"])
         style.configure("Horizontal.TScale", background=THEME["panel"], troughcolor="#ecdabc")
+        style.configure("TNotebook", background=THEME["panel"], borderwidth=0, tabmargins=(10, 10, 10, 0))
+        style.configure("TNotebook.Tab", background=THEME["panel_alt"], foreground=THEME["muted"], padding=(16, 7), bordercolor=THEME["line"], font=("Microsoft YaHei UI", 9, "bold"))
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", THEME["teal_soft"]), ("active", "#f8ead0")],
+            foreground=[("selected", THEME["teal_dark"]), ("active", THEME["ink"])],
+        )
         style.configure("Fenne.Horizontal.TProgressbar", troughcolor="#eadcc4", background=THEME["teal"], bordercolor=THEME["line"], lightcolor=THEME["teal"], darkcolor=THEME["teal_dark"])
 
     def build_ui(self) -> None:
@@ -248,19 +255,32 @@ class TranscriberGui(tk.Tk):
         settings_shell = ttk.Frame(main, padding=0, style="Panel.TFrame")
         settings_shell.rowconfigure(0, weight=1)
         settings_shell.columnconfigure(0, weight=1)
-        settings_canvas = tk.Canvas(settings_shell, width=370, bg=THEME["panel"], highlightthickness=0)
-        settings_scrollbar = ttk.Scrollbar(settings_shell, orient="vertical", command=settings_canvas.yview)
-        settings_canvas.grid(row=0, column=0, sticky="nsew")
-        settings_scrollbar.grid(row=0, column=1, sticky="ns")
-        settings = ttk.Frame(settings_canvas, padding=14, style="Panel.TFrame")
-        settings.columnconfigure(0, weight=1)
-        settings_window = settings_canvas.create_window((0, 0), window=settings, anchor="nw")
-        settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
-        settings.bind("<Configure>", lambda _event: settings_canvas.configure(scrollregion=settings_canvas.bbox("all")))
-        settings_canvas.bind("<Configure>", lambda event: settings_canvas.itemconfigure(settings_window, width=event.width))
+        settings_notebook = ttk.Notebook(settings_shell)
+        settings_notebook.grid(row=0, column=0, sticky="nsew")
         main.add(settings_shell, weight=0)
 
-        input_group = ttk.LabelFrame(settings, text="输入与模型", padding=12)
+        def add_settings_page(title: str) -> ttk.Frame:
+            page_shell = ttk.Frame(settings_notebook, style="Panel.TFrame")
+            page_shell.rowconfigure(0, weight=1)
+            page_shell.columnconfigure(0, weight=1)
+            canvas = tk.Canvas(page_shell, width=370, bg=THEME["panel"], highlightthickness=0)
+            scrollbar = ttk.Scrollbar(page_shell, orient="vertical", command=canvas.yview)
+            canvas.grid(row=0, column=0, sticky="nsew")
+            scrollbar.grid(row=0, column=1, sticky="ns")
+            page = ttk.Frame(canvas, padding=14, style="Panel.TFrame")
+            page.columnconfigure(0, weight=1)
+            page_window = canvas.create_window((0, 0), window=page, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            page.bind("<Configure>", lambda _event, c=canvas: c.configure(scrollregion=c.bbox("all")))
+            canvas.bind("<Configure>", lambda event, c=canvas, w=page_window: c.itemconfigure(w, width=event.width))
+            settings_notebook.add(page_shell, text=title)
+            return page
+
+        input_settings = add_settings_page("输入")
+        trigger_settings = add_settings_page("触发")
+        app_settings = add_settings_page("应用")
+
+        input_group = ttk.LabelFrame(input_settings, text="输入与模型", padding=12)
         input_group.grid(row=0, column=0, sticky="ew")
         input_group.columnconfigure(1, weight=1)
         row = 0
@@ -275,8 +295,8 @@ class TranscriberGui(tk.Tk):
         ttk.Label(input_group, text="文字转换").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
         ttk.Checkbutton(input_group, text="输出简体中文", variable=self.vars["simplify_chinese"]).grid(row=row, column=1, sticky="w", pady=5)
 
-        trigger_group = ttk.LabelFrame(settings, text="触发与分段", padding=12)
-        trigger_group.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        trigger_group = ttk.LabelFrame(trigger_settings, text="触发与分段", padding=12)
+        trigger_group.grid(row=0, column=0, sticky="ew")
         trigger_group.columnconfigure(1, weight=1)
         row = 0
         ttk.Label(trigger_group, text="触发模式").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
@@ -290,18 +310,31 @@ class TranscriberGui(tk.Tk):
         row = self.add_slider(trigger_group, row, "噪声丢弃等待秒数", "silence_seconds", 1.0, 8.0, 0.1)
         row = self.add_slider(trigger_group, row, "最长分段秒数", "max_phrase_seconds", 10.0, 120.0, 1.0)
 
-        presets = ttk.LabelFrame(settings, text="办公室预设", padding=12)
-        presets.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        presets = ttk.LabelFrame(trigger_settings, text="办公室预设", padding=12)
+        presets.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         presets.columnconfigure((0, 1, 2), weight=1)
         ttk.Button(presets, text="灵敏", command=lambda: self.set_thresholds(0.010, 0.015)).grid(row=0, column=0, sticky="ew", padx=(0, 6))
         ttk.Button(presets, text="办公室", command=lambda: self.set_thresholds(0.020, 0.030)).grid(row=0, column=1, sticky="ew", padx=3)
         ttk.Button(presets, text="严格", command=lambda: self.set_thresholds(0.040, 0.050)).grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
-        app_group = ttk.LabelFrame(settings, text="启动行为", padding=12)
-        app_group.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        app_group = ttk.LabelFrame(app_settings, text="启动行为", padding=12)
+        app_group.grid(row=0, column=0, sticky="ew")
         app_group.columnconfigure(1, weight=1)
         ttk.Checkbutton(app_group, text="启动后自动开始", variable=self.vars["auto_start"]).grid(row=0, column=0, columnspan=2, sticky="w")
         self.add_slider(app_group, 1, "缓存保留分钟", "cache_retention_minutes", 0.0, 60.0, 1.0)
+
+        storage_group = ttk.LabelFrame(app_settings, text="本地数据", padding=12)
+        storage_group.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        storage_group.columnconfigure(1, weight=1)
+        ttk.Label(storage_group, text="配置").grid(row=0, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Label(storage_group, text=str(CONFIG_PATH), style="Muted.TLabel", wraplength=250).grid(row=0, column=1, sticky="ew", pady=5)
+        ttk.Label(storage_group, text="模型缓存").grid(row=1, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Label(storage_group, text=str(APP_DIR / "cache" / "models"), style="Muted.TLabel", wraplength=250).grid(row=1, column=1, sticky="ew", pady=5)
+        folder_buttons = ttk.Frame(storage_group, style="Panel.TFrame")
+        folder_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        folder_buttons.columnconfigure((0, 1), weight=1)
+        ttk.Button(folder_buttons, text="打开转写目录", command=self.open_output_folder).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(folder_buttons, text="打开缓存目录", command=self.open_cache_folder).grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
         right = ttk.Frame(main, padding=0, style="Panel.TFrame")
         right.columnconfigure(0, weight=1)
@@ -763,6 +796,11 @@ class TranscriberGui(tk.Tk):
         output_dir = (APP_DIR / str(self.collect_config()["output_dir"])).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(["explorer", str(output_dir)])
+
+    def open_cache_folder(self) -> None:
+        cache_dir = (APP_DIR / "cache").resolve()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(["explorer", str(cache_dir)])
 
     def on_close(self) -> None:
         if self.process and self.process.poll() is None:
