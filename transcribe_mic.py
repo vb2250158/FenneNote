@@ -30,7 +30,7 @@ CUDA_DLL_DIRS = [
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 
 DEFAULT_CONFIG = {
     "config_version": CONFIG_VERSION,
@@ -60,7 +60,7 @@ DEFAULT_CONFIG = {
     "adaptive_threshold": True,
     "adaptive_threshold_multiplier": 2.5,
     "adaptive_threshold_margin": 0.004,
-    "vad_filter": True,
+    "vad_filter": False,
     "beam_size": 1,
     "condition_on_previous_text": False,
     "mic_device": None,
@@ -185,6 +185,8 @@ def migrate_config(user_config: dict) -> dict:
                 config["input_gain"] = DEFAULT_CONFIG["input_gain"]
             if float(user_config.get("cache_retention_minutes", 10.0)) == 10.0:
                 config["cache_retention_minutes"] = DEFAULT_CONFIG["cache_retention_minutes"]
+        if user_version < 5:
+            config["vad_filter"] = DEFAULT_CONFIG["vad_filter"]
         for key in PERSIST_ACROSS_CONFIG_VERSION_KEYS:
             if key in user_config:
                 config[key] = user_config[key]
@@ -202,6 +204,17 @@ def save_config(path: Path, config: dict) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+
+
+def download_configured_model(config: dict, status_callback=emit_status) -> Path:
+    storage_dirs = configure_local_storage(config)
+    model_name = str(config.get("model", DEFAULT_CONFIG["model"]))
+    from faster_whisper.utils import download_model
+
+    status_callback("model_download_start", f"正在下载或检查模型：{model_name}")
+    model_path = Path(download_model(model_name, cache_dir=str(storage_dirs["models"]))).resolve()
+    status_callback("model_download_ready", f"模型已安装：{model_name} -> {model_path}")
+    return model_path
 
 
 def today_output_path(output_dir: Path) -> Path:
@@ -510,6 +523,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Continuously transcribe microphone audio into daily text files.")
     parser.add_argument("--config", default="config.json", help="Path to config JSON.")
     parser.add_argument("--list-devices", action="store_true", help="List audio input/output devices and exit.")
+    parser.add_argument("--download-model", action="store_true", help="Download/check the configured Whisper model and exit.")
     args = parser.parse_args()
 
     if args.list_devices:
@@ -518,6 +532,9 @@ def main() -> int:
 
     config_path = Path(args.config).resolve()
     config = load_config(config_path)
+    if args.download_model:
+        download_configured_model(config)
+        return 0
     transcribe_loop(config)
     return 0
 

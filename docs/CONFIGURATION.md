@@ -24,6 +24,7 @@ FenneNote 的配置文件是程序所在目录下的 `config.json`。如果文�
 
 - `麦克风`：选择输入设备。
 - `模型`：默认 `small`。质量不够可试 `medium`，但显存和延迟会增加。
+- `安装模型`：提前下载当前选择的 Whisper 模型到 `cache/models/`，不加载 GPU。
 - `运行设备`：固定 `GPU / CUDA`。
 - `计算精度`：默认 `int8_float16`。
 - `语言`：可选自动识别、简体中文、英文、日文、韩文。
@@ -77,3 +78,16 @@ FenneNote 的配置文件是程序所在目录下的 `config.json`。如果文�
 - `mic_device`
 - `auto_start`
 
+## 模型缓存
+
+Whisper 模型不随工具打包，也不会提交到 GitHub。
+
+模型下载位置：
+
+```text
+cache/models/
+```
+
+GUI 的“安装模型”只下载模型文件，不开始录音，也不加载 GPU 推理。没有提前安装时，点击“开始”也会自动下载并加载当前模型。
+
+从配置版本 5 开始，`vad_filter` 默认关闭。FenneNote 使用自己的录音线和转写线做切段，不再要求打包内置 Silero VAD 模型。

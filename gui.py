@@ -17,7 +17,7 @@ from tkinter import messagebox, ttk
 import numpy as np
 import sounddevice as sd
 
-from transcribe_mic import DEFAULT_CONFIG, configure_local_storage, load_config, main as transcribe_cli_main, save_config as write_config, today_output_path
+from transcribe_mic import DEFAULT_CONFIG, configure_local_storage, download_configured_model, load_config, main as transcribe_cli_main, save_config as write_config, today_output_path
 
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -194,6 +194,7 @@ class TranscriberGui(tk.Tk):
             "mic_level_text": tk.StringVar(value="原始 0.000 / 增益后 0.000 / 录音 0.010 / 转写 0.015"),
             "trigger_state": tk.StringVar(value="状态：监听中"),
             "status": tk.StringVar(value="就绪"),
+            "model_cache_status": tk.StringVar(value="模型缓存：可提前安装"),
             "auto_start": tk.BooleanVar(value=bool(self.config_data.get("auto_start", False))),
             "reply_bubble_enabled": tk.BooleanVar(value=bool(self.config_data.get("reply_bubble_enabled", DEFAULT_CONFIG["reply_bubble_enabled"]))),
             "reply_bubble_port": tk.IntVar(value=int(self.config_data.get("reply_bubble_port", DEFAULT_CONFIG["reply_bubble_port"]))),
@@ -313,6 +314,13 @@ class TranscriberGui(tk.Tk):
         mic_combo, row = self.add_combo(input_group, row, "麦克风", "mic_device", [self.device_label_for(None)] + [label for _, label in self.devices])
         mic_combo.bind("<<ComboboxSelected>>", lambda _event: self.restart_level_monitor())
         _combo, row = self.add_combo(input_group, row, "模型", "model", ["small", "medium", "large-v3", "distil-large-v3"])
+        model_actions = ttk.Frame(input_group, style="Panel.TFrame")
+        model_actions.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        model_actions.columnconfigure(1, weight=1)
+        self.download_model_button = ttk.Button(model_actions, text="安装模型", command=self.install_selected_model)
+        self.download_model_button.grid(row=0, column=0, sticky="w", padx=(0, 10))
+        ttk.Label(model_actions, textvariable=self.vars["model_cache_status"], style="Muted.TLabel", wraplength=235).grid(row=0, column=1, sticky="ew")
+        row += 1
         ttk.Label(input_group, text="运行设备").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
         ttk.Label(input_group, text="GPU / CUDA").grid(row=row, column=1, sticky="w", pady=5)
         row += 1
@@ -720,6 +728,31 @@ class TranscriberGui(tk.Tk):
         self.configure_reply_bubble_server()
         self.vars["status"].set("配置已保存")
 
+    def install_selected_model(self) -> None:
+        if self.process and self.process.poll() is None:
+            messagebox.showinfo("安装模型", "转写正在运行，请先停止后再安装模型。")
+            return
+        config = self.collect_config()
+        write_config(CONFIG_PATH, config)
+        self.config_data = config
+        model_name = str(config.get("model", DEFAULT_CONFIG["model"]))
+        self.download_model_button.configure(state="disabled")
+        self.vars["model_cache_status"].set(f"模型缓存：正在安装 {model_name}")
+        self.append_log(f"正在安装模型：{model_name}")
+
+        def status_callback(code: str, message: str) -> None:
+            self.output_queue.put(f"FN_STATUS|{code}|{message}")
+
+        def worker() -> None:
+            try:
+                download_configured_model(config, status_callback=status_callback)
+            except Exception as exc:
+                self.output_queue.put(f"FN_STATUS|model_download_error|模型安装失败：{exc}")
+            finally:
+                self.output_queue.put("__MODEL_DOWNLOAD_DONE__")
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def start_transcriber(self) -> None:
         if self.process and self.process.poll() is None:
             return
@@ -765,6 +798,8 @@ class TranscriberGui(tk.Tk):
                 self.pause_button.configure(state="disabled")
                 self.stop_button.configure(state="disabled")
                 self.vars["status"].set("已停止")
+            elif line == "__MODEL_DOWNLOAD_DONE__":
+                self.download_model_button.configure(state="normal")
             elif line.startswith("FN_STATUS|"):
                 self.handle_worker_status(line)
             elif line.startswith("["):
@@ -786,8 +821,12 @@ class TranscriberGui(tk.Tk):
             return
         _prefix, code, message = parts
         self.vars["status"].set(message)
-        if code in {"model_loading", "queued", "transcribing", "discarded"}:
+        if code in {"model_loading", "model_download_start", "model_download_ready", "model_download_error", "queued", "transcribing", "discarded", "fatal"}:
             self.append_log(message)
+        if code == "model_download_ready":
+            self.vars["model_cache_status"].set("模型缓存：已安装")
+        elif code == "model_download_error":
+            self.vars["model_cache_status"].set("模型缓存：安装失败")
         if code == "transcribing":
             self.writing_until = time.monotonic() + 2.8
 

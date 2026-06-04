@@ -1,5 +1,5 @@
 {
-  "config_version": 4,
+  "config_version": 5,
   "auto_start": false,
   "model": "small",
   "device": "cuda",
@@ -26,7 +26,7 @@
   "adaptive_threshold": true,
   "adaptive_threshold_multiplier": 2.5,
   "adaptive_threshold_margin": 0.004,
-  "vad_filter": true,
+  "vad_filter": false,
   "beam_size": 1,
   "condition_on_previous_text": false,
   "mic_device": null,

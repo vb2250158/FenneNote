@@ -20,6 +20,7 @@ FenneNote 是一个面向 Windows 桌面的实时语音笔记工具。它适合�
 
 - Windows 中文 GUI，支持开始、暂停、停止和实时预览。
 - 固定 GPU / CUDA 模式，默认 `small + int8_float16`，兼顾 8GB 显存和 Unity 同时运行。
+- Whisper 模型不随工具打包，可在 GUI 中安装到本地 `cache/models/`。
 - 麦克风音量监测、滚动柱状波形、录音线和转写线。
 - 录音触发阈值与转写判定阈值分离，支持动态底噪。
 - 触发前保留音频，减少句首丢字。
@@ -52,9 +53,10 @@ cd C:\Data\CottonProject\FenneNote
 
 1. 在“输入”页选择麦克风。
 2. 保持默认 `small`、`GPU / CUDA`、`int8_float16`。
-3. 在主界面确认麦克风波形有变化。
-4. 点击“开始”。
-5. 说话后在“转写预览”查看文本，完整记录会写入 `transcripts/`。
+3. 点击“安装模型”，提前把选中的 Whisper 模型下载到 `cache/models/`。
+4. 在主界面确认麦克风波形有变化。
+5. 点击“开始”。
+6. 说话后在“转写预览”查看文本，完整记录会写入 `transcripts/`。
 
 更多细节见 [快速上手](docs/QUICK_START.md)。
 
@@ -127,4 +129,3 @@ py -3.10 -m py_compile gui.py transcribe_mic.py
 - 角色设定图：[assets/fennec-mascot-sheet.png](assets/fennec-mascot-sheet.png)
 - 窗口图标：[assets/fennenote.ico](assets/fennenote.ico)
 - 状态差分：`assets/fennenote-state-*.png`
-

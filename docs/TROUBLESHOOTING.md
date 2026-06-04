@@ -18,6 +18,18 @@
 
 办公室环境可以先点“灵敏”预设，观察是否能稳定触发。
 
+## 如何提前下载安装模型
+
+打开 GUI 的“输入”页，选择模型后点击“安装模型”。
+
+模型会下载到：
+
+```text
+cache/models/
+```
+
+这个过程不开始录音，也不加载 GPU 推理。下载完成后再点击“开始”。
+
 ## CUDA 运行库缺失
 
 如果看到类似：
@@ -96,4 +108,3 @@ cache/huggingface/
 - Gateway 端口是否和 FenneNote URL 一致。
 - 规则是否勾选 `voice_transcript`。
 - 数据目录下是否出现 `voice-transcripts.jsonl`。
-
