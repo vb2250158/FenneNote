@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -972,7 +973,12 @@ class TranscriberGui(tk.Tk):
 def main() -> int:
     if "--transcribe-child" in sys.argv:
         sys.argv.remove("--transcribe-child")
-        return transcribe_cli_main()
+        try:
+            return transcribe_cli_main()
+        except Exception as exc:
+            print(f"FN_STATUS|fatal|转写子进程异常：{exc}", flush=True)
+            traceback.print_exc()
+            return 1
     ensure_cuda_dll_path()
     configure_local_storage()
     app = TranscriberGui()
