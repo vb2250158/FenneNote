@@ -26,7 +26,8 @@ if (-not (Test-Path "$VenvDir\Scripts\python.exe")) {
     --hidden-import sounddevice `
     --hidden-import faster_whisper `
     --hidden-import ctranslate2 `
-    gui.py
+    --hidden-import PySide6 `
+    qt_gui.py
 
 Write-Host ""
 Write-Host "Build complete: $ScriptDir\dist\FenneNote\FenneNote.exe"

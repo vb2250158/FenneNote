@@ -15,4 +15,4 @@ if (-not (Test-Path "$VenvDir\Scripts\python.exe")) {
 
 & .\$VenvDir\Scripts\python.exe -m pip install -r requirements-gpu-cu11.txt
 & .\$VenvDir\Scripts\python.exe -m pip install faster-whisper==0.10.1 --no-deps
-& .\$VenvDir\Scripts\python.exe .\gui.py
+& .\$VenvDir\Scripts\python.exe .\qt_gui.py
