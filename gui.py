@@ -9,6 +9,7 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import webbrowser
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,7 +21,10 @@ import sounddevice as sd
 from transcribe_mic import (
     DEFAULT_CONFIG,
     DOWNLOADABLE_MODELS,
-    MODEL_REPOSITORIES,
+    FASTER_WHISPER_HOMEPAGE,
+    MODEL_PERFORMANCE_ROWS,
+    MODEL_PROFILES,
+    OPENAI_WHISPER_HOMEPAGE,
     configure_local_storage,
     delete_model_cache,
     download_configured_model,
@@ -161,6 +165,7 @@ class TranscriberGui(tk.Tk):
         self.model_download_buttons: dict[str, ttk.Button] = {}
         self.model_delete_buttons: dict[str, ttk.Button] = {}
         self.model_select_buttons: dict[str, ttk.Button] = {}
+        self.model_detail_vars: dict[str, tk.StringVar] = {}
 
         ensure_bundled_config_template()
         self.config_data = load_config(CONFIG_PATH)
@@ -499,23 +504,57 @@ class TranscriberGui(tk.Tk):
         self.refresh_model_manager()
 
     def build_model_manager(self, parent: ttk.Frame) -> None:
-        summary_group = ttk.LabelFrame(parent, text="模型管理", padding=12)
-        summary_group.grid(row=0, column=0, sticky="ew")
+        performance_group = ttk.LabelFrame(parent, text="性能速览", padding=12)
+        performance_group.grid(row=0, column=0, sticky="ew")
+        performance_group.columnconfigure(0, weight=1)
+        for row_index, row_data in enumerate(MODEL_PERFORMANCE_ROWS):
+            row_frame = ttk.Frame(performance_group, style="Panel.TFrame")
+            row_frame.grid(row=row_index, column=0, sticky="ew", pady=(0, 7))
+            row_frame.columnconfigure(1, weight=1)
+            ttk.Label(row_frame, text=row_data["family"], font=("Microsoft YaHei UI", 10, "bold"), width=7).grid(row=0, column=0, sticky="nw", padx=(0, 8))
+            summary = f"{row_data['parameters']} / {row_data['required_vram']} / {row_data['relative_speed']}"
+            ttk.Label(row_frame, text=summary, style="Status.TLabel").grid(row=0, column=1, sticky="w")
+            ttk.Label(row_frame, text=row_data["fennenote_advice"], style="Muted.TLabel", wraplength=250).grid(row=1, column=1, sticky="ew")
+
+        summary_group = ttk.LabelFrame(parent, text="当前模型", padding=12)
+        summary_group.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         summary_group.columnconfigure(1, weight=1)
-        ttk.Label(summary_group, text="当前模型").grid(row=0, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Label(summary_group, text="名称").grid(row=0, column=0, sticky="w", pady=5, padx=(0, 10))
         ttk.Label(summary_group, textvariable=self.vars["model"], style="Status.TLabel").grid(row=0, column=1, sticky="w", pady=5)
-        ttk.Label(summary_group, text="缓存目录").grid(row=1, column=0, sticky="w", pady=5, padx=(0, 10))
-        ttk.Label(summary_group, text=str(APP_DIR / "cache" / "models"), style="Muted.TLabel", wraplength=240).grid(row=1, column=1, sticky="ew", pady=5)
-        ttk.Label(summary_group, textvariable=self.vars["model_cache_status"], style="Muted.TLabel", wraplength=250).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 8))
+        self.model_detail_vars = {
+            "publisher": tk.StringVar(value="发布者："),
+            "specs": tk.StringVar(value="规格："),
+            "language": tk.StringVar(value="语言："),
+            "repository": tk.StringVar(value="仓库："),
+            "download": tk.StringVar(value="下载连接："),
+            "upstream": tk.StringVar(value="上游模型："),
+            "description": tk.StringVar(value="说明："),
+        }
+        detail_items = (
+            ("发布者", "publisher"),
+            ("规格", "specs"),
+            ("语言", "language"),
+            ("仓库", "repository"),
+            ("下载连接", "download"),
+            ("上游模型", "upstream"),
+            ("说明", "description"),
+        )
+        for index, (label, key) in enumerate(detail_items, start=1):
+            ttk.Label(summary_group, text=label).grid(row=index, column=0, sticky="nw", pady=4, padx=(0, 10))
+            ttk.Label(summary_group, textvariable=self.model_detail_vars[key], style="Muted.TLabel", wraplength=245).grid(row=index, column=1, sticky="ew", pady=4)
+        ttk.Label(summary_group, text="状态").grid(row=8, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Label(summary_group, textvariable=self.vars["model_cache_status"], style="Muted.TLabel", wraplength=245).grid(row=8, column=1, sticky="ew", pady=5)
 
         action_bar = ttk.Frame(summary_group, style="Panel.TFrame")
-        action_bar.grid(row=3, column=0, columnspan=2, sticky="ew")
-        action_bar.columnconfigure((0, 1), weight=1)
-        ttk.Button(action_bar, text="刷新状态", command=self.refresh_model_manager).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(action_bar, text="打开模型目录", command=self.open_model_folder).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        action_bar.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        action_bar.columnconfigure((0, 1, 2, 3), weight=1)
+        ttk.Button(action_bar, text="下载页", command=lambda: self.open_model_url("download")).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ttk.Button(action_bar, text="项目主页", command=lambda: self.open_model_url("homepage")).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(action_bar, text="上游规格", command=lambda: self.open_model_url("upstream")).grid(row=0, column=2, sticky="ew", padx=4)
+        ttk.Button(action_bar, text="缓存目录", command=self.open_model_folder).grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
         list_group = ttk.LabelFrame(parent, text="可下载模型", padding=12)
-        list_group.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        list_group.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         list_group.columnconfigure(0, weight=1)
         self.vars["model"].trace_add("write", lambda *_args: self.refresh_model_manager())
 
@@ -527,11 +566,13 @@ class TranscriberGui(tk.Tk):
             info = ttk.Frame(card, style="Panel.TFrame")
             info.grid(row=0, column=0, sticky="ew", padx=(0, 8))
             info.columnconfigure(0, weight=1)
+            profile = MODEL_PROFILES[model_name]
             ttk.Label(info, text=model_name, font=("Microsoft YaHei UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-            ttk.Label(info, text=MODEL_REPOSITORIES[model_name], style="Muted.TLabel", wraplength=150).grid(row=1, column=0, sticky="w")
+            ttk.Label(info, text=f"{profile['parameters']} / {profile['required_vram']} / {profile['relative_speed']}", style="Muted.TLabel", wraplength=150).grid(row=1, column=0, sticky="w")
+            ttk.Label(info, text=profile["description"], style="Muted.TLabel", wraplength=150).grid(row=2, column=0, sticky="w")
             status_var = tk.StringVar(value="检查中")
             self.model_status_vars[model_name] = status_var
-            ttk.Label(info, textvariable=status_var, style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=(2, 0))
+            ttk.Label(info, textvariable=status_var, style="Muted.TLabel").grid(row=3, column=0, sticky="w", pady=(2, 0))
 
             buttons = ttk.Frame(card, style="Panel.TFrame")
             buttons.grid(row=0, column=1, sticky="e")
@@ -541,6 +582,7 @@ class TranscriberGui(tk.Tk):
             download_button.grid(row=0, column=1, sticky="ew", padx=(0, 4))
             delete_button = ttk.Button(buttons, text="删除", width=4, command=lambda name=model_name: self.delete_model(name), style="Danger.TButton")
             delete_button.grid(row=0, column=2, sticky="ew")
+            ttk.Button(buttons, text="说明", width=4, command=lambda name=model_name: self.open_model_url("download", name)).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(5, 0))
             self.model_select_buttons[model_name] = select_button
             self.model_download_buttons[model_name] = download_button
             self.model_delete_buttons[model_name] = delete_button
@@ -583,6 +625,7 @@ class TranscriberGui(tk.Tk):
             return
         config = self.collect_config()
         current_model = self.vars["model"].get()
+        self.refresh_model_detail(current_model)
         current_installed = False
         for model_name in DOWNLOADABLE_MODELS:
             try:
@@ -604,6 +647,27 @@ class TranscriberGui(tk.Tk):
                 self.model_status_vars[model_name].set(f"{state_text} · {cache_root.name}")
         self.vars["model_cache_status"].set(f"{current_model}：{'已安装' if current_installed else '未安装'}")
 
+    def refresh_model_detail(self, model_name: str) -> None:
+        if not self.model_detail_vars:
+            return
+        profile = MODEL_PROFILES.get(model_name)
+        if profile is None:
+            self.model_detail_vars["publisher"].set("未知")
+            self.model_detail_vars["specs"].set("当前模型不在内置清单中")
+            self.model_detail_vars["language"].set("")
+            self.model_detail_vars["repository"].set("")
+            self.model_detail_vars["download"].set("")
+            self.model_detail_vars["upstream"].set("")
+            self.model_detail_vars["description"].set("")
+            return
+        self.model_detail_vars["publisher"].set(f"{profile['publisher']}，faster-whisper / CTranslate2 转换版")
+        self.model_detail_vars["specs"].set(f"{profile['parameters']} 参数，显存 {profile['required_vram']}，相对速度 {profile['relative_speed']}")
+        self.model_detail_vars["language"].set(str(profile["language_scope"]))
+        self.model_detail_vars["repository"].set(str(profile["repository"]))
+        self.model_detail_vars["download"].set(str(profile["download_url"]))
+        self.model_detail_vars["upstream"].set(str(profile["upstream_repository"]))
+        self.model_detail_vars["description"].set(str(profile["description"]))
+
     def select_model(self, model_name: str) -> None:
         self.vars["model"].set(model_name)
         self.save_config()
@@ -612,6 +676,19 @@ class TranscriberGui(tk.Tk):
     def set_model_buttons_busy(self, busy: bool) -> None:
         self.model_operation_running = busy
         self.refresh_model_manager()
+
+    def open_model_url(self, kind: str, model_name: str | None = None) -> None:
+        name = model_name or self.vars["model"].get()
+        profile = MODEL_PROFILES.get(name)
+        url = ""
+        if kind == "homepage":
+            url = FASTER_WHISPER_HOMEPAGE
+        elif kind == "upstream":
+            url = str(profile["upstream_url"]) if profile is not None else OPENAI_WHISPER_HOMEPAGE
+        elif profile is not None:
+            url = str(profile["download_url"])
+        if url:
+            webbrowser.open(url)
 
     def install_model(self, model_name: str) -> None:
         if self.process and self.process.poll() is None:

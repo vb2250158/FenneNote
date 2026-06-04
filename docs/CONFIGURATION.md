@@ -31,6 +31,8 @@ FenneNote 的配置文件是程序所在目录下的 `config.json`。如果文�
 
 模型页：
 
+- 顶部性能表：按系列展示参数量、显存参考、相对速度和 FenneNote 建议。
+- 当前模型资料：展示发布者、仓库、下载/说明页、上游模型和中文用途说明。
 - `选择`：把该模型写入当前配置，并同步到输入页下拉框。
 - `下载`：下载未安装模型到 `cache/models/`。
 - `检查`：已安装模型再次检查本地缓存。
@@ -102,5 +104,7 @@ GUI 的“模型”页只下载或删除模型文件，不开始录音，也不�
 tiny.en, tiny, base.en, base, small.en, small,
 medium.en, medium, large-v1, large-v2, large-v3, large
 ```
+
+完整发布者、下载连接和性能建议见 [模型说明](MODELS.md)。
 
 从配置版本 5 开始，`vad_filter` 默认关闭。FenneNote 使用自己的录音线和转写线做切段，不再要求打包内置 Silero VAD 模型。

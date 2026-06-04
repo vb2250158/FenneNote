@@ -91,6 +91,100 @@ MODEL_REPOSITORIES = {
 
 DOWNLOADABLE_MODELS = tuple(MODEL_REPOSITORIES.keys())
 
+FASTER_WHISPER_HOMEPAGE = "https://github.com/SYSTRAN/faster-whisper"
+OPENAI_WHISPER_HOMEPAGE = "https://github.com/openai/whisper"
+
+MODEL_PERFORMANCE_ROWS = (
+    {
+        "family": "tiny",
+        "parameters": "39M",
+        "required_vram": "约 1 GB",
+        "relative_speed": "约 10x",
+        "fennenote_advice": "极轻量测试，中文质量较弱",
+    },
+    {
+        "family": "base",
+        "parameters": "74M",
+        "required_vram": "约 1 GB",
+        "relative_speed": "约 7x",
+        "fennenote_advice": "快速草稿，短句可用",
+    },
+    {
+        "family": "small",
+        "parameters": "244M",
+        "required_vram": "约 2 GB",
+        "relative_speed": "约 4x",
+        "fennenote_advice": "默认推荐，适合 8GB 显存常驻",
+    },
+    {
+        "family": "medium",
+        "parameters": "769M",
+        "required_vram": "约 5 GB",
+        "relative_speed": "约 2x",
+        "fennenote_advice": "质量更好，占用和延迟更高",
+    },
+    {
+        "family": "large",
+        "parameters": "1550M",
+        "required_vram": "约 10 GB",
+        "relative_speed": "1x",
+        "fennenote_advice": "准确率优先，8GB+Unity 不建议常驻",
+    },
+)
+
+MODEL_FAMILY_SPECS = {row["family"]: row for row in MODEL_PERFORMANCE_ROWS}
+
+MODEL_VARIANT_DATA = {
+    "tiny.en": ("tiny", "仅英文", "英文实时草稿和功能测试，不适合中文。"),
+    "tiny": ("tiny", "多语言，含中文", "最快的中文可用模型，适合确认流程，不适合正式记录。"),
+    "base.en": ("base", "仅英文", "英文短句更稳，中文场景不要选这个。"),
+    "base": ("base", "多语言，含中文", "低占用中文草稿，质量明显弱于 small。"),
+    "small.en": ("small", "仅英文", "英文场景的轻量推荐，中文场景不要选这个。"),
+    "small": ("small", "多语言，含中文", "FenneNote 默认推荐，速度、质量和 8GB 显存占用比较均衡。"),
+    "medium.en": ("medium", "仅英文", "英文质量优先，显存和延迟高于 small。"),
+    "medium": ("medium", "多语言，含中文", "中文质量优先时可选，但和 Unity 同开时要观察显存。"),
+    "large-v1": ("large", "多语言，含中文", "第一版 large，历史兼容用途为主。"),
+    "large-v2": ("large", "多语言，含中文", "第二版 large，准确率优先但不适合 8GB 常驻。"),
+    "large-v3": ("large", "多语言，含中文", "当前 large-v3，质量优先；8GB 显存同时开 Unity 时慎用。"),
+    "large": ("large", "多语言，含中文", "large-v3 的别名，效果和 large-v3 相同。"),
+}
+
+UPSTREAM_MODEL_REPOSITORIES = {
+    "tiny.en": "openai/whisper-tiny.en",
+    "tiny": "openai/whisper-tiny",
+    "base.en": "openai/whisper-base.en",
+    "base": "openai/whisper-base",
+    "small.en": "openai/whisper-small.en",
+    "small": "openai/whisper-small",
+    "medium.en": "openai/whisper-medium.en",
+    "medium": "openai/whisper-medium",
+    "large-v1": "openai/whisper-large",
+    "large-v2": "openai/whisper-large-v2",
+    "large-v3": "openai/whisper-large-v3",
+    "large": "openai/whisper-large-v3",
+}
+
+MODEL_PROFILES = {
+    model_name: {
+        "name": model_name,
+        "publisher": "SYSTRAN",
+        "repository": repository,
+        "download_url": f"https://huggingface.co/{repository}",
+        "homepage_url": FASTER_WHISPER_HOMEPAGE,
+        "upstream_repository": UPSTREAM_MODEL_REPOSITORIES[model_name],
+        "upstream_url": f"https://huggingface.co/{UPSTREAM_MODEL_REPOSITORIES[model_name]}",
+        "family": family,
+        "language_scope": language_scope,
+        "parameters": MODEL_FAMILY_SPECS[family]["parameters"],
+        "required_vram": MODEL_FAMILY_SPECS[family]["required_vram"],
+        "relative_speed": MODEL_FAMILY_SPECS[family]["relative_speed"],
+        "family_advice": MODEL_FAMILY_SPECS[family]["fennenote_advice"],
+        "description": description,
+    }
+    for model_name, repository in MODEL_REPOSITORIES.items()
+    for family, language_scope, description in (MODEL_VARIANT_DATA[model_name],)
+}
+
 PERSIST_ACROSS_CONFIG_VERSION_KEYS = {
     "auto_start",
     "mic_device",

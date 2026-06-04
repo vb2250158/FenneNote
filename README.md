@@ -92,6 +92,7 @@ GUI：
 
 - [快速上手](docs/QUICK_START.md)
 - [配置说明](docs/CONFIGURATION.md)
+- [模型说明](docs/MODELS.md)
 - [RabiRoute 接入](docs/RABIROUTE.md)
 - [排错指南](docs/TROUBLESHOOTING.md)
 
@@ -110,12 +111,7 @@ cache/audio/        预留音频临时缓存
 
 源码运行和打包版运行会分别读取各自目录下的 `config.json`。如果同时使用 `.\run_gui.ps1` 和 `dist\FenneNote\FenneNote.exe`，它们的配置互不共享。
 
-当前 GUI 可管理的模型：
-
-```text
-tiny.en, tiny, base.en, base, small.en, small,
-medium.en, medium, large-v1, large-v2, large-v3, large
-```
+当前 GUI 可管理的模型见 [模型说明](docs/MODELS.md)。默认推荐 `small`，8GB 显存同时运行 Unity 时不建议常驻使用 `large-v3`。
 
 ## 开发验证
 
