@@ -104,6 +104,17 @@ def prepare_process_environment(config: dict) -> dict[str, str]:
     return env
 
 
+def decode_process_output_line(raw_line: bytes | str) -> str:
+    if isinstance(raw_line, str):
+        return raw_line
+    for encoding in ("utf-8-sig", "gb18030", "utf-16"):
+        try:
+            return raw_line.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw_line.decode("utf-8", errors="replace")
+
+
 class TranscriberGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -112,7 +123,7 @@ class TranscriberGui(tk.Tk):
         self.geometry("980x680")
         self.minsize(860, 560)
 
-        self.process: subprocess.Popen[str] | None = None
+        self.process: subprocess.Popen[bytes] | None = None
         self.output_queue: queue.Queue[str] = queue.Queue()
         self.level_queue: queue.Queue[tuple[float, float]] = queue.Queue()
         self.level_stream: sd.InputStream | None = None
@@ -729,10 +740,7 @@ class TranscriberGui(tk.Tk):
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
+            bufsize=0,
             startupinfo=startupinfo,
             env=child_env,
         )
@@ -744,8 +752,8 @@ class TranscriberGui(tk.Tk):
 
     def read_process_output(self) -> None:
         assert self.process and self.process.stdout
-        for line in self.process.stdout:
-            self.output_queue.put(line)
+        for raw_line in self.process.stdout:
+            self.output_queue.put(decode_process_output_line(raw_line))
         self.output_queue.put("__PROCESS_EXITED__")
 
     def drain_process_output(self) -> None:
@@ -903,7 +911,7 @@ class TranscriberGui(tk.Tk):
     def toggle_pause(self) -> None:
         if not self.process or not self.process.stdin or self.process.poll() is not None:
             return
-        command = "r\n" if self.is_paused else "p\n"
+        command = b"r\n" if self.is_paused else b"p\n"
         self.process.stdin.write(command)
         self.process.stdin.flush()
         self.is_paused = not self.is_paused
@@ -915,7 +923,7 @@ class TranscriberGui(tk.Tk):
             return
         try:
             if self.process.stdin:
-                self.process.stdin.write("q\n")
+                self.process.stdin.write(b"q\n")
                 self.process.stdin.flush()
             self.process.wait(timeout=5)
         except Exception:
