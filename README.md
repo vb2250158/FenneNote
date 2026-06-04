@@ -20,7 +20,7 @@ FenneNote 是一个面向 Windows 桌面的实时语音笔记工具。它适合�
 
 - Windows 中文 GUI，支持开始、暂停、停止和实时预览。
 - 固定 GPU / CUDA 模式，默认 `small + int8_float16`，兼顾 8GB 显存和 Unity 同时运行。
-- Whisper 模型不随工具打包，可在 GUI 中安装到本地 `cache/models/`。
+- Whisper 模型不随工具打包，可在 GUI 的“模型”页下载、删除和检查本地缓存。
 - 麦克风音量监测、滚动柱状波形、录音线和转写线。
 - 录音触发阈值与转写判定阈值分离，支持动态底噪。
 - 触发前保留音频，减少句首丢字。
@@ -53,10 +53,11 @@ cd C:\Data\CottonProject\FenneNote
 
 1. 在“输入”页选择麦克风。
 2. 保持默认 `small`、`GPU / CUDA`、`int8_float16`。
-3. 点击“安装模型”，提前把选中的 Whisper 模型下载到 `cache/models/`。
-4. 在主界面确认麦克风波形有变化。
-5. 点击“开始”。
-6. 说话后在“转写预览”查看文本，完整记录会写入 `transcripts/`。
+3. 打开“模型”页，选择并下载需要的 Whisper 模型。
+4. 回到“输入”页，确认下拉框选择了要使用的模型。
+5. 在主界面确认麦克风波形有变化。
+6. 点击“开始”。
+7. 说话后在“转写预览”查看文本，完整记录会写入 `transcripts/`。
 
 更多细节见 [快速上手](docs/QUICK_START.md)。
 
@@ -108,6 +109,13 @@ cache/audio/        预留音频临时缓存
 ```
 
 源码运行和打包版运行会分别读取各自目录下的 `config.json`。如果同时使用 `.\run_gui.ps1` 和 `dist\FenneNote\FenneNote.exe`，它们的配置互不共享。
+
+当前 GUI 可管理的模型：
+
+```text
+tiny.en, tiny, base.en, base, small.en, small,
+medium.en, medium, large-v1, large-v2, large-v3, large
+```
 
 ## 开发验证
 

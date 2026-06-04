@@ -17,7 +17,20 @@ from tkinter import messagebox, ttk
 import numpy as np
 import sounddevice as sd
 
-from transcribe_mic import DEFAULT_CONFIG, configure_local_storage, download_configured_model, load_config, main as transcribe_cli_main, save_config as write_config, today_output_path
+from transcribe_mic import (
+    DEFAULT_CONFIG,
+    DOWNLOADABLE_MODELS,
+    MODEL_REPOSITORIES,
+    configure_local_storage,
+    delete_model_cache,
+    download_configured_model,
+    load_config,
+    main as transcribe_cli_main,
+    model_cache_root,
+    model_is_installed,
+    save_config as write_config,
+    today_output_path,
+)
 
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -143,6 +156,11 @@ class TranscriberGui(tk.Tk):
         self.reply_server: ThreadingHTTPServer | None = None
         self.reply_server_thread: threading.Thread | None = None
         self.reply_bubble: tk.Toplevel | None = None
+        self.model_operation_running = False
+        self.model_status_vars: dict[str, tk.StringVar] = {}
+        self.model_download_buttons: dict[str, ttk.Button] = {}
+        self.model_delete_buttons: dict[str, ttk.Button] = {}
+        self.model_select_buttons: dict[str, ttk.Button] = {}
 
         ensure_bundled_config_template()
         self.config_data = load_config(CONFIG_PATH)
@@ -174,8 +192,11 @@ class TranscriberGui(tk.Tk):
     def create_vars(self) -> dict[str, tk.Variable]:
         device_index = self.config_data.get("mic_device")
         language_code = self.config_data.get("language_mode", self.config_data.get("language", "zh"))
+        model_name = str(self.config_data.get("model", DEFAULT_CONFIG["model"]))
+        if model_name not in DOWNLOADABLE_MODELS:
+            model_name = DEFAULT_CONFIG["model"]
         return {
-            "model": tk.StringVar(value=str(self.config_data.get("model", "small"))),
+            "model": tk.StringVar(value=model_name),
             "device": tk.StringVar(value="cuda"),
             "compute_type": tk.StringVar(value=str(self.config_data.get("compute_type", "int8_float16"))),
             "language": tk.StringVar(value=LANGUAGE_LABELS.get(str(language_code), "简体中文")),
@@ -303,6 +324,7 @@ class TranscriberGui(tk.Tk):
             return page
 
         input_settings = add_settings_page("输入")
+        model_settings = add_settings_page("模型")
         trigger_settings = add_settings_page("触发")
         app_settings = add_settings_page("应用")
         route_settings = add_settings_page("路由")
@@ -313,13 +335,10 @@ class TranscriberGui(tk.Tk):
         row = 0
         mic_combo, row = self.add_combo(input_group, row, "麦克风", "mic_device", [self.device_label_for(None)] + [label for _, label in self.devices])
         mic_combo.bind("<<ComboboxSelected>>", lambda _event: self.restart_level_monitor())
-        _combo, row = self.add_combo(input_group, row, "模型", "model", ["small", "medium", "large-v3", "distil-large-v3"])
-        model_actions = ttk.Frame(input_group, style="Panel.TFrame")
-        model_actions.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 5))
-        model_actions.columnconfigure(1, weight=1)
-        self.download_model_button = ttk.Button(model_actions, text="安装模型", command=self.install_selected_model)
-        self.download_model_button.grid(row=0, column=0, sticky="w", padx=(0, 10))
-        ttk.Label(model_actions, textvariable=self.vars["model_cache_status"], style="Muted.TLabel", wraplength=235).grid(row=0, column=1, sticky="ew")
+        model_combo, row = self.add_combo(input_group, row, "模型", "model", list(DOWNLOADABLE_MODELS))
+        model_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh_model_manager())
+        ttk.Label(input_group, text="模型状态").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Label(input_group, textvariable=self.vars["model_cache_status"], style="Muted.TLabel", wraplength=250).grid(row=row, column=1, sticky="ew", pady=5)
         row += 1
         ttk.Label(input_group, text="运行设备").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
         ttk.Label(input_group, text="GPU / CUDA").grid(row=row, column=1, sticky="w", pady=5)
@@ -328,6 +347,8 @@ class TranscriberGui(tk.Tk):
         _combo, row = self.add_combo(input_group, row, "语言", "language", list(LANGUAGE_CODES.keys()))
         ttk.Label(input_group, text="文字转换").grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
         ttk.Checkbutton(input_group, text="输出简体中文", variable=self.vars["simplify_chinese"]).grid(row=row, column=1, sticky="w", pady=5)
+
+        self.build_model_manager(model_settings)
 
         trigger_group = ttk.LabelFrame(trigger_settings, text="触发与分段", padding=12)
         trigger_group.grid(row=0, column=0, sticky="ew")
@@ -475,6 +496,57 @@ class TranscriberGui(tk.Tk):
         self.transcript.tag_configure("log", foreground=THEME["sand_dark"])
         self.transcript.tag_configure("text", foreground=THEME["ink"])
         self.show_placeholder()
+        self.refresh_model_manager()
+
+    def build_model_manager(self, parent: ttk.Frame) -> None:
+        summary_group = ttk.LabelFrame(parent, text="模型管理", padding=12)
+        summary_group.grid(row=0, column=0, sticky="ew")
+        summary_group.columnconfigure(1, weight=1)
+        ttk.Label(summary_group, text="当前模型").grid(row=0, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Label(summary_group, textvariable=self.vars["model"], style="Status.TLabel").grid(row=0, column=1, sticky="w", pady=5)
+        ttk.Label(summary_group, text="缓存目录").grid(row=1, column=0, sticky="w", pady=5, padx=(0, 10))
+        ttk.Label(summary_group, text=str(APP_DIR / "cache" / "models"), style="Muted.TLabel", wraplength=240).grid(row=1, column=1, sticky="ew", pady=5)
+        ttk.Label(summary_group, textvariable=self.vars["model_cache_status"], style="Muted.TLabel", wraplength=250).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 8))
+
+        action_bar = ttk.Frame(summary_group, style="Panel.TFrame")
+        action_bar.grid(row=3, column=0, columnspan=2, sticky="ew")
+        action_bar.columnconfigure((0, 1), weight=1)
+        ttk.Button(action_bar, text="刷新状态", command=self.refresh_model_manager).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(action_bar, text="打开模型目录", command=self.open_model_folder).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        list_group = ttk.LabelFrame(parent, text="可下载模型", padding=12)
+        list_group.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        list_group.columnconfigure(0, weight=1)
+        self.vars["model"].trace_add("write", lambda *_args: self.refresh_model_manager())
+
+        for index, model_name in enumerate(DOWNLOADABLE_MODELS):
+            card = ttk.Frame(list_group, padding=(0, 5), style="Panel.TFrame")
+            card.grid(row=index * 2, column=0, sticky="ew")
+            card.columnconfigure(0, weight=1)
+
+            info = ttk.Frame(card, style="Panel.TFrame")
+            info.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+            info.columnconfigure(0, weight=1)
+            ttk.Label(info, text=model_name, font=("Microsoft YaHei UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+            ttk.Label(info, text=MODEL_REPOSITORIES[model_name], style="Muted.TLabel", wraplength=150).grid(row=1, column=0, sticky="w")
+            status_var = tk.StringVar(value="检查中")
+            self.model_status_vars[model_name] = status_var
+            ttk.Label(info, textvariable=status_var, style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=(2, 0))
+
+            buttons = ttk.Frame(card, style="Panel.TFrame")
+            buttons.grid(row=0, column=1, sticky="e")
+            select_button = ttk.Button(buttons, text="选择", width=4, command=lambda name=model_name: self.select_model(name))
+            select_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            download_button = ttk.Button(buttons, text="下载", width=4, command=lambda name=model_name: self.install_model(name))
+            download_button.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+            delete_button = ttk.Button(buttons, text="删除", width=4, command=lambda name=model_name: self.delete_model(name), style="Danger.TButton")
+            delete_button.grid(row=0, column=2, sticky="ew")
+            self.model_select_buttons[model_name] = select_button
+            self.model_download_buttons[model_name] = download_button
+            self.model_delete_buttons[model_name] = delete_button
+
+            if index < len(DOWNLOADABLE_MODELS) - 1:
+                ttk.Separator(list_group, orient="horizontal").grid(row=index * 2 + 1, column=0, sticky="ew", pady=4)
 
     def add_combo(self, parent: ttk.Frame, row: int, label: str, key: str, values: list[str]) -> tuple[ttk.Combobox, int]:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
@@ -505,6 +577,90 @@ class TranscriberGui(tk.Tk):
         self.vars["record_threshold"].set(record_threshold)
         self.vars["transcribe_threshold"].set(max(record_threshold, transcribe_threshold))
         self.update_level_text(float(self.vars["mic_level"].get()))
+
+    def refresh_model_manager(self) -> None:
+        if not self.model_status_vars:
+            return
+        config = self.collect_config()
+        current_model = self.vars["model"].get()
+        current_installed = False
+        for model_name in DOWNLOADABLE_MODELS:
+            try:
+                installed = model_is_installed(config, model_name)
+                cache_root = model_cache_root(config, model_name)
+            except Exception:
+                installed = False
+                cache_root = None
+            is_current = model_name == current_model
+            if is_current:
+                current_installed = installed
+            state_text = "当前 / 已安装" if is_current and installed else "当前 / 未安装" if is_current else "已安装" if installed else "未安装"
+            self.model_status_vars[model_name].set(state_text)
+            self.model_select_buttons[model_name].configure(state="disabled" if is_current or self.model_operation_running else "normal")
+            self.model_download_buttons[model_name].configure(state="disabled" if self.model_operation_running else "normal")
+            self.model_delete_buttons[model_name].configure(state="normal" if installed and not self.model_operation_running else "disabled")
+            self.model_download_buttons[model_name].configure(text="检查" if installed else "下载")
+            if cache_root is not None and installed:
+                self.model_status_vars[model_name].set(f"{state_text} · {cache_root.name}")
+        self.vars["model_cache_status"].set(f"{current_model}：{'已安装' if current_installed else '未安装'}")
+
+    def select_model(self, model_name: str) -> None:
+        self.vars["model"].set(model_name)
+        self.save_config()
+        self.refresh_model_manager()
+
+    def set_model_buttons_busy(self, busy: bool) -> None:
+        self.model_operation_running = busy
+        self.refresh_model_manager()
+
+    def install_model(self, model_name: str) -> None:
+        if self.process and self.process.poll() is None:
+            messagebox.showinfo("下载模型", "转写正在运行，请先停止后再管理模型。")
+            return
+        self.vars["model"].set(model_name)
+        config = self.collect_config()
+        write_config(CONFIG_PATH, config)
+        self.config_data = config
+        self.set_model_buttons_busy(True)
+        self.vars["model_cache_status"].set(f"{model_name}：正在下载或检查")
+        self.append_log(f"正在下载或检查模型：{model_name}")
+
+        def status_callback(code: str, message: str) -> None:
+            self.output_queue.put(f"FN_STATUS|{code}|{message}")
+
+        def worker() -> None:
+            try:
+                download_configured_model(config, status_callback=status_callback)
+            except Exception as exc:
+                self.output_queue.put(f"FN_STATUS|model_download_error|模型安装失败：{exc}")
+            finally:
+                self.output_queue.put("__MODEL_OPERATION_DONE__")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def delete_model(self, model_name: str) -> None:
+        if self.process and self.process.poll() is None:
+            messagebox.showinfo("删除模型", "转写正在运行，请先停止后再管理模型。")
+            return
+        if not messagebox.askyesno("删除模型", f"删除本地模型缓存：{model_name}？"):
+            return
+        config = self.collect_config()
+        self.set_model_buttons_busy(True)
+        self.vars["model_cache_status"].set(f"{model_name}：正在删除")
+        self.append_log(f"正在删除模型缓存：{model_name}")
+
+        def status_callback(code: str, message: str) -> None:
+            self.output_queue.put(f"FN_STATUS|{code}|{message}")
+
+        def worker() -> None:
+            try:
+                delete_model_cache(config, model_name, status_callback=status_callback)
+            except Exception as exc:
+                self.output_queue.put(f"FN_STATUS|model_delete_error|模型删除失败：{exc}")
+            finally:
+                self.output_queue.put("__MODEL_OPERATION_DONE__")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def update_level_text(self, level: float, raw_level: float | None = None) -> None:
         record_threshold = self.current_preview_threshold()
@@ -727,31 +883,10 @@ class TranscriberGui(tk.Tk):
         self.config_data = config
         self.configure_reply_bubble_server()
         self.vars["status"].set("配置已保存")
+        self.refresh_model_manager()
 
     def install_selected_model(self) -> None:
-        if self.process and self.process.poll() is None:
-            messagebox.showinfo("安装模型", "转写正在运行，请先停止后再安装模型。")
-            return
-        config = self.collect_config()
-        write_config(CONFIG_PATH, config)
-        self.config_data = config
-        model_name = str(config.get("model", DEFAULT_CONFIG["model"]))
-        self.download_model_button.configure(state="disabled")
-        self.vars["model_cache_status"].set(f"模型缓存：正在安装 {model_name}")
-        self.append_log(f"正在安装模型：{model_name}")
-
-        def status_callback(code: str, message: str) -> None:
-            self.output_queue.put(f"FN_STATUS|{code}|{message}")
-
-        def worker() -> None:
-            try:
-                download_configured_model(config, status_callback=status_callback)
-            except Exception as exc:
-                self.output_queue.put(f"FN_STATUS|model_download_error|模型安装失败：{exc}")
-            finally:
-                self.output_queue.put("__MODEL_DOWNLOAD_DONE__")
-
-        threading.Thread(target=worker, daemon=True).start()
+        self.install_model(self.vars["model"].get())
 
     def start_transcriber(self) -> None:
         if self.process and self.process.poll() is None:
@@ -798,8 +933,8 @@ class TranscriberGui(tk.Tk):
                 self.pause_button.configure(state="disabled")
                 self.stop_button.configure(state="disabled")
                 self.vars["status"].set("已停止")
-            elif line == "__MODEL_DOWNLOAD_DONE__":
-                self.download_model_button.configure(state="normal")
+            elif line == "__MODEL_OPERATION_DONE__":
+                self.set_model_buttons_busy(False)
             elif line.startswith("FN_STATUS|"):
                 self.handle_worker_status(line)
             elif line.startswith("["):
@@ -821,12 +956,18 @@ class TranscriberGui(tk.Tk):
             return
         _prefix, code, message = parts
         self.vars["status"].set(message)
-        if code in {"model_loading", "model_download_start", "model_download_ready", "model_download_error", "queued", "transcribing", "discarded", "fatal"}:
+        if code in {"model_loading", "model_download_start", "model_download_ready", "model_download_error", "model_delete_start", "model_delete_ready", "model_delete_error", "queued", "transcribing", "discarded", "fatal"}:
             self.append_log(message)
         if code == "model_download_ready":
             self.vars["model_cache_status"].set("模型缓存：已安装")
+            self.refresh_model_manager()
         elif code == "model_download_error":
             self.vars["model_cache_status"].set("模型缓存：安装失败")
+        elif code == "model_delete_ready":
+            self.vars["model_cache_status"].set("模型缓存：已删除")
+            self.refresh_model_manager()
+        elif code == "model_delete_error":
+            self.vars["model_cache_status"].set("模型缓存：删除失败")
         if code == "transcribing":
             self.writing_until = time.monotonic() + 2.8
 
@@ -998,6 +1139,11 @@ class TranscriberGui(tk.Tk):
         cache_dir = (APP_DIR / "cache").resolve()
         cache_dir.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(["explorer", str(cache_dir)])
+
+    def open_model_folder(self) -> None:
+        model_dir = configure_local_storage(self.collect_config())["models"].resolve()
+        model_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(["explorer", str(model_dir)])
 
     def on_close(self) -> None:
         if self.process and self.process.poll() is None:

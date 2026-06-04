@@ -74,6 +74,23 @@ DEFAULT_CONFIG = {
     "rabiroute_source": "fennenote",
 }
 
+MODEL_REPOSITORIES = {
+    "tiny.en": "Systran/faster-whisper-tiny.en",
+    "tiny": "Systran/faster-whisper-tiny",
+    "base.en": "Systran/faster-whisper-base.en",
+    "base": "Systran/faster-whisper-base",
+    "small.en": "Systran/faster-whisper-small.en",
+    "small": "Systran/faster-whisper-small",
+    "medium.en": "Systran/faster-whisper-medium.en",
+    "medium": "Systran/faster-whisper-medium",
+    "large-v1": "Systran/faster-whisper-large-v1",
+    "large-v2": "Systran/faster-whisper-large-v2",
+    "large-v3": "Systran/faster-whisper-large-v3",
+    "large": "Systran/faster-whisper-large-v3",
+}
+
+DOWNLOADABLE_MODELS = tuple(MODEL_REPOSITORIES.keys())
+
 PERSIST_ACROSS_CONFIG_VERSION_KEYS = {
     "auto_start",
     "mic_device",
@@ -206,9 +223,55 @@ def save_config(path: Path, config: dict) -> None:
         handle.write("\n")
 
 
+def model_repository_id(model_name: str) -> str:
+    normalized = model_name.strip()
+    if normalized in MODEL_REPOSITORIES:
+        return MODEL_REPOSITORIES[normalized]
+    if "/" in normalized:
+        return normalized
+    raise ValueError(f"当前版本不支持模型名称：{model_name}")
+
+
+def model_cache_root(config: dict, model_name: str) -> Path:
+    storage_dirs = configure_local_storage(config)
+    repo_id = model_repository_id(model_name)
+    return storage_dirs["models"] / f"models--{repo_id.replace('/', '--')}"
+
+
+def model_snapshot_path(config: dict, model_name: str) -> Path | None:
+    root = model_cache_root(config, model_name)
+    snapshots = root / "snapshots"
+    if not snapshots.exists():
+        return None
+    for snapshot in snapshots.iterdir():
+        if snapshot.is_dir() and (snapshot / "model.bin").exists():
+            return snapshot
+    return None
+
+
+def model_is_installed(config: dict, model_name: str) -> bool:
+    return model_snapshot_path(config, model_name) is not None
+
+
+def delete_model_cache(config: dict, model_name: str, status_callback=emit_status) -> None:
+    storage_dirs = configure_local_storage(config)
+    root = model_cache_root(config, model_name)
+    lock_root = storage_dirs["models"] / ".locks" / root.name
+    if not root.exists() and not lock_root.exists():
+        status_callback("model_delete_ready", f"模型缓存不存在：{model_name}")
+        return
+    status_callback("model_delete_start", f"正在删除模型缓存：{model_name}")
+    if root.exists():
+        shutil.rmtree(root)
+    if lock_root.exists():
+        shutil.rmtree(lock_root)
+    status_callback("model_delete_ready", f"模型缓存已删除：{model_name}")
+
+
 def download_configured_model(config: dict, status_callback=emit_status) -> Path:
     storage_dirs = configure_local_storage(config)
     model_name = str(config.get("model", DEFAULT_CONFIG["model"]))
+    model_repository_id(model_name)
     from faster_whisper.utils import download_model
 
     status_callback("model_download_start", f"正在下载或检查模型：{model_name}")
