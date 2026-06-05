@@ -1,6 +1,12 @@
 .venv/
 .venv-gpu/
 config.json
+config.local.json
+config.*.local.json
+*.secret.json
+*.secrets.json
+.env
+.env.*
 transcripts/
 cache/
 __pycache__/
@@ -9,3 +15,13 @@ reference-cache/
 build/
 dist/
 *.spec
+logs/
+*.log
+*.jsonl
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.webm
+*.pcm

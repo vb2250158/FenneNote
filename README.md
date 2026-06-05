@@ -43,7 +43,7 @@ FenneNote 是一个面向 Windows 桌面的实时语音笔记工具。它适合�
 启动 GUI：
 
 ```powershell
-cd C:\Data\CottonProject\FenneNote
+cd C:\Path\To\FenneNote
 .\run_gui.ps1
 ```
 
@@ -94,7 +94,39 @@ GUI：
 - [配置说明](docs/CONFIGURATION.md)
 - [模型说明](docs/MODELS.md)
 - [RabiRoute 接入](docs/RABIROUTE.md)
+- [开源发布检查清单](docs/OPEN_SOURCE_CHECKLIST.md)
 - [排错指南](docs/TROUBLESHOOTING.md)
+
+## 语音工作站链路
+
+FenneNote 只负责“电脑旁用户语音 -> 转写文本事件”。推荐把完整 voice interaction workstation 拆成下面几段：
+
+```text
+FenneNote 麦克风转写
+-> RabiRoute /webhook 接收 voice_transcript
+-> Codex/Agent 按文本事件处理任务
+-> OumuQ/worker 按角色配置生成 TTS 回声
+```
+
+边界建议：
+
+- FenneNote 的语音输入代表用户在电脑旁说话，适合触发 Codex 侧角色语音回声。
+- QQ、群聊、机器人侧消息默认按文字处理，不应自动回发语音；只有确认来自 FenneNote 的 `voice_transcript` 才进入语音回声链路。
+- 日语识别可能不稳定。办公场景建议优先使用简体中文普通话，并在提示词里保留常见技术术语：Unity、Editor、GPU、CPU、AI、Bug、微信、项目、功能、消息、发送、测试。
+- RabiRoute、OumuQ、角色 TTS worker 的真实 URL、token、cookie、角色私有配置和公司环境参数都应在部署机器本地填写，不要写进公开仓库。
+
+完整接入说明见 [RabiRoute 接入](docs/RABIROUTE.md)。
+
+## 公开发布安全
+
+公开仓库只保留脱敏模板和部署说明。提交到 GitHub 前请确认没有包含：
+
+- 真实 webhook URL、公网域名、内网地址、token、cookie、API key。
+- `config.json`、`.env`、公司环境配置、个人绝对路径。
+- `transcripts/`、音频缓存、私有录音、会议记录、运行日志。
+- 打包产物、模型缓存、临时文件。
+
+本机运行时请从 `config.example.json` 生成 `config.json`，再在 GUI 或本地配置文件中填写真实参数。`config.json` 已被 `.gitignore` 排除。
 
 ## 目录和数据
 

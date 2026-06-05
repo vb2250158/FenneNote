@@ -61,13 +61,13 @@ C:\Program Files\NVIDIA Corporation\NVIDIA Canvas
 源码版读取：
 
 ```text
-C:\Data\CottonProject\FenneNote\config.json
+C:\Path\To\FenneNote\config.json
 ```
 
 打包版读取：
 
 ```text
-C:\Data\CottonProject\FenneNote\dist\FenneNote\config.json
+C:\Path\To\FenneNote\dist\FenneNote\config.json
 ```
 
 如果两个入口混用，需要分别保存配置，或手动复制 `config.json`。

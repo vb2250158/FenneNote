@@ -2,6 +2,8 @@
 
 FenneNote 的配置文件是程序所在目录下的 `config.json`。如果文件不存在，程序会从 `config.example.json` 创建。
 
+`config.example.json` 是公开脱敏模板，真实部署参数只应写入本机 `config.json`。不要把公司环境 webhook、token、cookie、API key、个人路径、录音或日志提交到 GitHub。
+
 ## 推荐默认值
 
 默认配置偏向“8GB 显存 + 同时运行 Unity”的场景：
@@ -64,6 +66,24 @@ FenneNote 的配置文件是程序所在目录下的 `config.json`。如果文�
 - `推送 URL`：默认 `http://127.0.0.1:8791/webhook`。
 - `来源 ID`：默认 `fennenote`。
 - `访问令牌`：可选。填写后会用 `Authorization: Bearer <token>` 发送。
+
+公司环境部署时，`推送 URL` 和 `访问令牌` 在部署机器本地填写。公开仓库不要写入真实内网地址、公网域名或任何密钥。
+
+## 语言与提示词
+
+FenneNote 默认面向简体中文普通话办公场景。推荐提示词保留常见英文技术术语：
+
+```text
+以下是简体中文普通话办公场景转写，可能包含 Unity、Editor、GPU、CPU、AI、Bug、微信、项目、功能、消息、发送、测试等术语。请保持中文为简体，英文术语保留英文。
+```
+
+日语识别可能不稳定，尤其是中文、英文技术词和日语混合输入。需要日语时建议建立单独本地配置做测试，不要把未验证的日语提示词作为公开默认值。
+
+## QQ 与语音边界
+
+FenneNote 代表电脑旁麦克风输入，可以把 `voice_transcript` 交给 RabiRoute、Codex/Agent，再由 OumuQ 或 TTS worker 生成角色语音回声。
+
+QQ、微信群聊或机器人平台消息默认应只按文字处理，不自动发语音。只有明确来自 FenneNote 的 `voice_transcript`，才建议恢复 Codex 侧语音输出。
 
 ## 阈值逻辑
 

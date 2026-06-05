@@ -23,7 +23,7 @@ C:\Program Files\NVIDIA Corporation\NVIDIA Canvas
 ## 2. 启动 GUI
 
 ```powershell
-cd C:\Data\CottonProject\FenneNote
+cd C:\Path\To\FenneNote
 .\run_gui.ps1
 ```
 
@@ -85,3 +85,15 @@ Get-Content .\transcripts\2026-06-03.txt -Wait -Encoding UTF8
 打包版会使用 `dist\FenneNote\config.json`。如果你之前用源码版调过配置，需要在打包版里重新保存一次，或手动复制配置。
 
 打包版不包含 Whisper 模型。用户第一次使用时仍需要通过“模型”页或“开始”下载模型到安装目录下的 `cache/models/`。
+
+## 6. 公司环境部署
+
+公开仓库中的 `config.example.json` 只是脱敏模板。部署到公司环境时：
+
+1. 在部署机器上启动一次 GUI，让程序生成本地 `config.json`。
+2. 在 GUI 的“路由”页填写公司环境的 RabiRoute webhook URL 和访问令牌。
+3. 如果使用 API 转写，在本地 `config.json` 或 GUI 中填写 API Key，不要修改并提交模板里的空值。
+4. 公司内网域名、真实 token、cookie、角色私有配置、音频记录和日志只保存在部署环境。
+5. 上传 GitHub 前运行 `git status` 和 `git diff --staged`，确认 staged 内容没有任何真实配置。
+
+FenneNote 建议作为电脑旁语音输入端使用。QQ/群聊消息默认只进入文字链路；只有来自 FenneNote 的 `voice_transcript` 才建议触发 Codex/Agent 处理后的角色 TTS 回声。
