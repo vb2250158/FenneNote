@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import json
 import os
 import queue
@@ -12,6 +14,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import wave
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -64,6 +67,13 @@ DEFAULT_CONFIG = {
     "beam_size": 1,
     "condition_on_previous_text": False,
     "mic_device": None,
+    "model_source": "local",
+    "api_provider": "dashscope",
+    "api_provider_id": "dashscope",
+    "api_provider_enabled": False,
+    "api_model": "qwen3-asr-flash",
+    "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "api_key": "",
     "reply_bubble_enabled": True,
     "reply_bubble_port": 8792,
     "reply_bubble_seconds": 3.0,
@@ -468,6 +478,142 @@ def should_keep_text(text: str, language: str | None, config: dict) -> bool:
     return True
 
 
+def phrase_to_wav_bytes(phrase: Phrase, sample_rate: int) -> bytes:
+    samples = np.asarray(phrase.audio, dtype=np.float32)
+    if samples.ndim > 1:
+        samples = samples[:, 0]
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(pcm.tobytes())
+    return buffer.getvalue()
+
+
+def phrase_to_audio_data_url(phrase: Phrase, sample_rate: int) -> str:
+    encoded = base64.b64encode(phrase_to_wav_bytes(phrase, sample_rate)).decode("ascii")
+    return f"data:audio/wav;base64,{encoded}"
+
+
+def dashscope_generation_url(config: dict) -> str:
+    base_url = str(config.get("api_base_url", "")).strip()
+    native_path = "/api/v1/services/aigc/multimodal-generation/generation"
+    if native_path in base_url:
+        return base_url
+    return "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+
+
+def content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        parts: list[str] = []
+        for key in ("text", "transcript", "content"):
+            value = content.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, (list, dict)):
+                nested = content_to_text(value)
+                if nested:
+                    parts.append(nested)
+        return " ".join(part.strip() for part in parts if part.strip())
+    if isinstance(content, list):
+        parts = [content_to_text(item) for item in content]
+        return " ".join(part.strip() for part in parts if part.strip())
+    return ""
+
+
+def extract_dashscope_text(payload: dict) -> str:
+    output = payload.get("output", {})
+    direct = content_to_text(output.get("text")) if isinstance(output, dict) else ""
+    if direct:
+        return direct.strip()
+
+    choice_sets = []
+    if isinstance(output, dict):
+        choice_sets.append(output.get("choices"))
+    choice_sets.append(payload.get("choices"))
+    for choices in choice_sets:
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message", {})
+            text = content_to_text(message.get("content") if isinstance(message, dict) else choice.get("content"))
+            if text:
+                return text.strip()
+
+    fallback_parts: list[str] = []
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"text", "transcript"} and isinstance(item, str):
+                    fallback_parts.append(item)
+                else:
+                    walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    return " ".join(part.strip() for part in fallback_parts if part.strip()).strip()
+
+
+def transcribe_phrase_with_dashscope(config: dict, phrase: Phrase, language: str | None, converter: OpenCC | None) -> str:
+    api_key = str(config.get("api_key", "")).strip()
+    if not api_key:
+        raise RuntimeError("DashScope API Key is empty.")
+    model_name = str(config.get("api_model", "")).strip() or "qwen3-asr-flash"
+    prompt = str(config.get("initial_prompt", "")).strip() or "Please transcribe this audio accurately."
+    content = [{"audio": phrase_to_audio_data_url(phrase, int(config["sample_rate"]))}]
+    payload = {
+        "model": model_name,
+        "input": {
+            "messages": [
+                {"role": "system", "content": [{"text": prompt}]},
+                {"role": "user", "content": content},
+            ]
+        },
+    }
+    asr_options = {"enable_itn": False}
+    if language:
+        asr_options["language"] = language
+    payload["parameters"] = {"asr_options": asr_options}
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        dashscope_generation_url(config),
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "FenneNote",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            response_text = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        error_text = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"DashScope HTTP {exc.code}: {error_text[:500]}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"DashScope request failed: {exc}") from exc
+
+    try:
+        response_payload = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"DashScope returned non-JSON response: {response_text[:500]}") from exc
+    text = extract_dashscope_text(response_payload)
+    if not text:
+        raise RuntimeError(f"DashScope response did not contain transcript text: {response_text[:500]}")
+    return simplify_text(text, converter)
+
+
 def rms(samples: np.ndarray) -> float:
     if samples.size == 0:
         return 0.0
@@ -626,6 +772,42 @@ def collect_phrases(config: dict, stop_event: threading.Event) -> queue.Queue[Ph
 def transcribe_loop(config: dict) -> None:
     storage_dirs = configure_local_storage(config)
     output_dir = app_path(str(config["output_dir"])).resolve()
+    model_source = str(config.get("model_source", "local") or "local").lower()
+    if model_source == "api":
+        api_provider = str(config.get("api_provider", config.get("api_provider_id", "")) or "").lower()
+        if api_provider not in {"dashscope", "千问 / dashscope"}:
+            raise RuntimeError(f"Unsupported API provider: {api_provider or '(empty)'}. DashScope is currently supported.")
+        if not str(config.get("api_key", "")).strip():
+            raise RuntimeError("DashScope API Key is empty.")
+        language = config.get("language_mode", config.get("language", "zh"))
+        if language in {"auto", "", None}:
+            language = None
+        converter = OpenCC("t2s") if bool(config.get("simplify_chinese", True)) else None
+        stop_event = threading.Event()
+        phrases = collect_phrases(config, stop_event)
+        emit_status("api_ready", f"API 模型已就绪：DashScope / {config.get('api_model', 'qwen3-asr-flash')}")
+        emit_status("output_ready", f"写入目录：{output_dir}")
+        emit_status("cache_ready", f"本地缓存：{storage_dirs['cache']}")
+
+        while not stop_event.is_set():
+            try:
+                phrase = phrases.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            emit_status("transcribing", f"正在转写：{(phrase.ended_at - phrase.started_at).total_seconds():.1f} 秒音频，峰值 {phrase.peak:.3f}")
+            try:
+                text = transcribe_phrase_with_dashscope(config, phrase, language, converter)
+            except Exception as exc:
+                emit_status("api_error", f"API 转写失败：{exc}")
+                continue
+            if not should_keep_text(text, language, config):
+                emit_status("discarded", "本段已转写但没有保留有效文字，已丢弃")
+                continue
+            append_line(output_dir, phrase.started_at, text)
+            post_rabiroute_event(config, phrase, text)
+            emit_status("written", "转写完成，已写入今日文本")
+        return
     from faster_whisper import WhisperModel
 
     emit_status("model_loading", f"正在准备模型：{config['model']}（首次运行可能需要下载到本地 cache/models）")
