@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -579,7 +580,7 @@ class FenneNoteQt(QMainWindow):
                 background: {THEME["sand"]};
                 color: #2b2018;
             }}
-            QFrame#card, QFrame#heroCard, QFrame#buddyBubble, QGroupBox {{
+            QFrame#card, QFrame#heroCard, QFrame#buddyBubble, QFrame#compactOverview, QGroupBox {{
                 background: {THEME["panel"]};
                 border: 1px solid {THEME["line"]};
                 border-radius: 8px;
@@ -588,9 +589,32 @@ class FenneNoteQt(QMainWindow):
                 background: {THEME["panel_tint"]};
                 border-color: {THEME["line_strong"]};
             }}
+            QFrame#compactOverview {{
+                background: rgba(255, 253, 248, 180);
+                border-color: {THEME["peach"]};
+            }}
             QFrame#buddyBubble {{
                 background: {THEME["panel_soft"]};
                 border-color: {THEME["peach"]};
+            }}
+            QFrame#logDrawer {{
+                background: {THEME["panel"]};
+                border: 1px solid {THEME["line_strong"]};
+                border-radius: 8px;
+            }}
+            QPushButton#logToggle {{
+                background: {THEME["sand"]};
+                color: #2b2018;
+                border-color: {THEME["sand_dark"]};
+                font-weight: 800;
+                padding: 6px 8px;
+            }}
+            QPushButton#logToggle:hover {{
+                background: {THEME["peach"]};
+            }}
+            QPlainTextEdit#logText {{
+                font-family: Consolas, "Microsoft YaHei UI";
+                font-size: 9pt;
             }}
             QGroupBox {{
                 margin-top: 12px;
@@ -668,6 +692,7 @@ class FenneNoteQt(QMainWindow):
         )
 
         root = QWidget()
+        self.root_widget = root
         self.setCentralWidget(root)
         layout = QHBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -695,6 +720,7 @@ class FenneNoteQt(QMainWindow):
         main_layout.setContentsMargins(18, 16, 18, 16)
         main_layout.setSpacing(14)
         layout.addWidget(main, 1)
+        self.build_log_drawer(root)
 
         topbar = QFrame()
         topbar.setObjectName("card")
@@ -709,7 +735,9 @@ class FenneNoteQt(QMainWindow):
         self.stop_button.setObjectName("danger")
         self.save_button = QPushButton("保存配置")
         self.folder_button = QPushButton("打开目录")
-        for button in (self.start_button, self.save_button, self.folder_button):
+        self.log_button = QPushButton("日志")
+        self.log_button.setAccessibleName("打开或收起运行日志")
+        for button in (self.start_button, self.save_button, self.folder_button, self.log_button):
             topbar_layout.addWidget(button)
         main_layout.addWidget(topbar)
 
@@ -729,10 +757,77 @@ class FenneNoteQt(QMainWindow):
         self.stop_button.clicked.connect(self.stop_transcriber)
         self.save_button.clicked.connect(self.save_config)
         self.folder_button.clicked.connect(self.open_output_folder)
+        self.log_button.clicked.connect(self.toggle_log_drawer)
         self.pause_button.setEnabled(False)
         self.pause_button.setVisible(False)
         self.stop_button.setEnabled(False)
         self.stop_button.setVisible(False)
+
+    def build_log_drawer(self, parent: QWidget) -> None:
+        self.log_drawer_expanded = False
+        self.log_drawer = QFrame(parent)
+        self.log_drawer.setObjectName("logDrawer")
+        shadow = QGraphicsDropShadowEffect(self.log_drawer)
+        shadow.setBlurRadius(22)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(96, 73, 45, 58))
+        self.log_drawer.setGraphicsEffect(shadow)
+
+        drawer_layout = QVBoxLayout(self.log_drawer)
+        drawer_layout.setContentsMargins(12, 12, 12, 12)
+        drawer_layout.setSpacing(10)
+
+        log_header = QHBoxLayout()
+        self.log_title = QLabel("运行日志")
+        self.log_title.setStyleSheet("font-weight: 800;")
+        self.clear_log_button = QPushButton("清空")
+        self.clear_log_button.setAccessibleName("清空运行日志")
+        self.clear_log_button.clicked.connect(lambda: self.log_text.clear())
+        self.collapse_log_button = QPushButton("收起")
+        self.collapse_log_button.setAccessibleName("收起运行日志")
+        self.collapse_log_button.clicked.connect(lambda: self.set_log_drawer_expanded(False))
+        log_header.addWidget(self.log_title, 1)
+        log_header.addWidget(self.clear_log_button)
+        log_header.addWidget(self.collapse_log_button)
+        drawer_layout.addLayout(log_header)
+
+        self.log_text = QPlainTextEdit()
+        self.log_text.setObjectName("logText")
+        self.log_text.setReadOnly(True)
+        self.log_text.setPlaceholderText("暂无日志")
+        drawer_layout.addWidget(self.log_text, 1)
+
+        self.set_log_drawer_expanded(False)
+
+    def toggle_log_drawer(self) -> None:
+        self.set_log_drawer_expanded(not self.log_drawer_expanded)
+
+    def set_log_drawer_expanded(self, expanded: bool) -> None:
+        self.log_drawer_expanded = expanded
+        self.log_drawer.setVisible(expanded)
+        if hasattr(self, "log_button"):
+            self.log_button.setText("收起日志" if expanded else "日志")
+        self.update_log_drawer_geometry()
+
+    def update_log_drawer_geometry(self) -> None:
+        if not hasattr(self, "log_drawer") or not self.log_drawer_expanded:
+            return
+        rect = self.root_widget.rect()
+        margin = 14
+        width = min(420, max(340, rect.width() // 3))
+        height = max(320, rect.height() - 104)
+        x = rect.width() - width - margin
+        y = 76
+        self.log_drawer.setGeometry(x, y, width, height)
+        self.log_drawer.raise_()
+
+    def append_log(self, message: str) -> None:
+        if not message or not hasattr(self, "log_text"):
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.appendPlainText(f"[{timestamp}] {message}")
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def page(self) -> tuple[QScrollArea, QWidget, QVBoxLayout]:
         scroll = QScrollArea()
@@ -760,6 +855,31 @@ class FenneNoteQt(QMainWindow):
         hero_subtitle.setWordWrap(True)
         hero_subtitle.setStyleSheet(f"color: {THEME['muted']};")
         hero_text.addWidget(hero_subtitle)
+
+        model_overview = QFrame()
+        model_overview.setObjectName("compactOverview")
+        model_overview_layout = QGridLayout(model_overview)
+        model_overview_layout.setContentsMargins(10, 8, 10, 8)
+        model_overview_layout.setHorizontalSpacing(10)
+        model_overview_layout.setVerticalSpacing(4)
+        model_overview_layout.setColumnStretch(1, 1)
+        self.overview_source_label = QLabel("来源")
+        self.overview_model_label = QLabel("模型")
+        self.overview_state_label = QLabel("状态")
+        self.overview_detail_label = QLabel()
+        for label in (self.overview_source_label, self.overview_model_label, self.overview_state_label):
+            label.setStyleSheet("font-size: 14px; font-weight: 800;")
+        self.overview_detail_label.setWordWrap(True)
+        self.overview_detail_label.setStyleSheet(f"color: {THEME['muted']};")
+        model_overview_layout.addWidget(QLabel("模型来源"), 0, 0)
+        model_overview_layout.addWidget(self.overview_source_label, 0, 1)
+        model_overview_layout.addWidget(QLabel("启动模型"), 1, 0)
+        model_overview_layout.addWidget(self.overview_model_label, 1, 1)
+        model_overview_layout.addWidget(QLabel("当前状态"), 2, 0)
+        model_overview_layout.addWidget(self.overview_state_label, 2, 1)
+        model_overview_layout.addWidget(self.overview_detail_label, 3, 0, 1, 2)
+        hero_text.addWidget(model_overview)
+
         self.trigger_state_label = QLabel("状态：监听中")
         self.trigger_state_label.setStyleSheet(f"color: {THEME['teal_dark']}; font-weight: 700;")
         hero_text.addWidget(self.trigger_state_label)
@@ -780,26 +900,6 @@ class FenneNoteQt(QMainWindow):
         buddy_layout.addWidget(self.buddy_caption)
         hero_layout.addWidget(buddy_card, 0)
         layout.addWidget(hero)
-
-        model_overview = QGroupBox("当前启动配置")
-        model_overview_layout = QGridLayout(model_overview)
-        model_overview_layout.setColumnStretch(1, 1)
-        self.overview_source_label = QLabel("来源")
-        self.overview_model_label = QLabel("模型")
-        self.overview_state_label = QLabel("状态")
-        self.overview_detail_label = QLabel()
-        for label in (self.overview_source_label, self.overview_model_label, self.overview_state_label):
-            label.setStyleSheet("font-size: 15px; font-weight: 800;")
-        self.overview_detail_label.setWordWrap(True)
-        self.overview_detail_label.setStyleSheet(f"color: {THEME['muted']};")
-        model_overview_layout.addWidget(QLabel("模型来源"), 0, 0)
-        model_overview_layout.addWidget(self.overview_source_label, 0, 1)
-        model_overview_layout.addWidget(QLabel("启动模型"), 1, 0)
-        model_overview_layout.addWidget(self.overview_model_label, 1, 1)
-        model_overview_layout.addWidget(QLabel("当前状态"), 2, 0)
-        model_overview_layout.addWidget(self.overview_state_label, 2, 1)
-        model_overview_layout.addWidget(self.overview_detail_label, 3, 0, 1, 2)
-        layout.addWidget(model_overview)
 
         monitor = QGroupBox("实时监听")
         monitor_layout = QVBoxLayout(monitor)
@@ -945,6 +1045,8 @@ class FenneNoteQt(QMainWindow):
         _, _, layout = self.page()
         summary = QGroupBox("当前生效参数")
         summary_layout = QVBoxLayout(summary)
+        self.trigger_wave = WaveWidget()
+        summary_layout.addWidget(self.trigger_wave)
         self.trigger_summary = QLabel()
         self.trigger_summary.setWordWrap(True)
         summary_layout.addWidget(self.trigger_summary)
@@ -956,6 +1058,7 @@ class FenneNoteQt(QMainWindow):
         self.record_threshold = self.slider(0.01, 0.04, 0.001, 3)
         self.transcribe_threshold = self.slider(0.01, 0.06, 0.001, 3)
         self.pre_roll = self.slider(0.0, 3.0, 0.1, 1, "s")
+        self.min_phrase = self.slider(0.2, 10.0, 0.1, 1, "s")
         self.pause_seconds = self.slider(0.2, 2.0, 0.1, 1, "s")
         self.silence_seconds = self.slider(1.0, 8.0, 0.1, 1, "s")
         self.max_phrase = self.slider(10.0, 120.0, 1.0, 0, "s")
@@ -965,13 +1068,14 @@ class FenneNoteQt(QMainWindow):
             ("录音触发阈值", self.record_threshold),
             ("转写判定阈值", self.transcribe_threshold),
             ("触发前保留秒数", self.pre_roll),
+            ("最短有效录音秒数", self.min_phrase),
             ("低于转写线等待秒数", self.pause_seconds),
             ("噪声丢弃等待秒数", self.silence_seconds),
             ("最长分段秒数", self.max_phrase),
         ):
             form.addRow(label, widget)
         layout.addWidget(group)
-        for widget in (self.input_gain, self.record_threshold, self.transcribe_threshold, self.pre_roll, self.pause_seconds, self.silence_seconds, self.max_phrase):
+        for widget in (self.input_gain, self.record_threshold, self.transcribe_threshold, self.pre_roll, self.min_phrase, self.pause_seconds, self.silence_seconds, self.max_phrase):
             widget.valueChanged.connect(self.update_trigger_summary)
         self.adaptive_check.stateChanged.connect(self.update_trigger_summary)
 
@@ -1038,6 +1142,7 @@ class FenneNoteQt(QMainWindow):
         self.transcribe_threshold.setValue(float(config.get("transcribe_threshold", 0.015)))
         self.adaptive_check.setChecked(bool(config.get("adaptive_threshold", True)))
         self.pre_roll.setValue(float(config.get("pre_roll_seconds", 1.5)))
+        self.min_phrase.setValue(float(config.get("min_phrase_seconds", DEFAULT_CONFIG["min_phrase_seconds"])))
         self.pause_seconds.setValue(float(config.get("transcribe_pause_seconds", 0.5)))
         self.silence_seconds.setValue(float(config.get("silence_seconds", 1.2)))
         self.max_phrase.setValue(float(config.get("max_phrase_seconds", 12.0)))
@@ -1324,12 +1429,12 @@ class FenneNoteQt(QMainWindow):
     def on_model_operation_status(self, message: str) -> None:
         self.status_label.setText(message)
         self.model_cache_status.setText(message)
-        self.transcript.appendPlainText(f"系统：{message}")
+        self.append_log(message)
 
     def on_model_operation_finished(self, ok: bool, message: str) -> None:
         self.status_label.setText(message if ok else f"模型操作失败：{message}")
         self.model_cache_status.setText(message if ok else f"模型操作失败：{message}")
-        self.transcript.appendPlainText(f"系统：{message if ok else '模型操作失败：' + message}")
+        self.append_log(message if ok else f"模型操作失败：{message}")
         self.set_model_operation_busy(False)
         self.model_thread = None
         self.model_worker = None
@@ -1398,7 +1503,7 @@ class FenneNoteQt(QMainWindow):
         self.trigger_summary.setText(
             f"增益 {self.input_gain.value():.1f}x / 录音线 {record:.3f} / 转写线 {transcribe:.3f} / "
             f"前置 {self.pre_roll.value():.1f}s / 等待 {self.pause_seconds.value():.1f}s / "
-            f"丢弃 {self.silence_seconds.value():.1f}s / 最长 {self.max_phrase.value():.0f}s / "
+            f"最短 {self.min_phrase.value():.1f}s / 丢弃 {self.silence_seconds.value():.1f}s / 最长 {self.max_phrase.value():.0f}s / "
             f"{'动态阈值' if self.adaptive_check.isChecked() else '固定阈值'}"
         )
 
@@ -1440,6 +1545,7 @@ class FenneNoteQt(QMainWindow):
                 "transcribe_threshold": round(max(record, self.transcribe_threshold.value()), 4),
                 "rms_threshold": round(record, 4),
                 "pre_roll_seconds": round(self.pre_roll.value(), 1),
+                "min_phrase_seconds": round(self.min_phrase.value(), 1),
                 "transcribe_pause_seconds": round(self.pause_seconds.value(), 1),
                 "silence_seconds": round(self.silence_seconds.value(), 2),
                 "max_phrase_seconds": round(self.max_phrase.value(), 1),
@@ -1462,6 +1568,7 @@ class FenneNoteQt(QMainWindow):
         write_config(CONFIG_PATH, config)
         self.config_data = config
         self.status_label.setText("配置已保存")
+        self.append_log("配置已保存")
         self.update_provider_status()
         self.refresh_local_models()
 
@@ -1470,6 +1577,7 @@ class FenneNoteQt(QMainWindow):
         self.source_combo.setCurrentText("API 模型")
         self.save_config()
         self.status_label.setText("已切换到 API Provider；开始后将使用千问 ASR")
+        self.append_log("已切换到 API Provider；开始后将使用千问 ASR")
 
     def validate_api_provider(self) -> None:
         missing = []
@@ -1540,6 +1648,7 @@ class FenneNoteQt(QMainWindow):
             message = f"连接成功：RabiRoute 已接收测试事件（HTTP {status}）"
             self.route_status.setText(message)
             self.status_label.setText(message)
+            self.append_log(message)
             QMessageBox.information(self, "RabiRoute", message)
         else:
             message = f"连接失败：HTTP {status}"
@@ -1563,6 +1672,7 @@ class FenneNoteQt(QMainWindow):
         self.level_thread.started.connect(self.level_worker.run)
         self.level_worker.level.connect(self.on_level)
         self.level_worker.error.connect(self.status_label.setText)
+        self.level_worker.error.connect(self.append_log)
         self.level_thread.start()
 
     def stop_level_worker(self) -> None:
@@ -1588,6 +1698,7 @@ class FenneNoteQt(QMainWindow):
             self.set_buddy_state("listening" if level >= threshold else "idle")
         self.trigger_state_label.setText("状态：录音中，芬妮正在听" if level >= threshold else "状态：监听中，芬妮在待命")
         self.wave.push(self.display_level, threshold, transcribe)
+        self.trigger_wave.push(self.display_level, threshold, transcribe)
 
     def toggle_transcriber(self) -> None:
         if self.transcriber_running():
@@ -1637,6 +1748,7 @@ class FenneNoteQt(QMainWindow):
         self.pause_button.setEnabled(True)
         self.stop_button.setEnabled(True)
         self.status_label.setText("正在启动")
+        self.append_log("正在启动转写进程")
         self.set_buddy_state("listening")
 
     def send_process_command(self, command: str) -> None:
@@ -1646,6 +1758,7 @@ class FenneNoteQt(QMainWindow):
     def stop_transcriber(self) -> None:
         if self.process_worker:
             self.status_label.setText("正在停止")
+            self.append_log("正在停止转写进程")
             self.start_button.setEnabled(False)
             self.process_worker.stop()
 
@@ -1654,7 +1767,7 @@ class FenneNoteQt(QMainWindow):
             parts = line.split("|", 2)
             if len(parts) == 3:
                 self.status_label.setText(parts[2])
-                self.transcript.appendPlainText(f"系统：{parts[2]}")
+                self.append_log(parts[2])
             return
         if line.startswith("["):
             self.writing_until = time.monotonic() + 2.8
@@ -1662,12 +1775,13 @@ class FenneNoteQt(QMainWindow):
             self.transcript.appendPlainText(line)
         elif line:
             self.status_label.setText(line[:100])
-            self.transcript.appendPlainText(f"系统：{line}")
+            self.append_log(line)
 
     def on_process_exited(self, _code: int) -> None:
         self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.status_label.setText("已停止")
+        self.append_log("转写进程已停止")
         self.running_config = None
         self.writing_until = 0.0
         self.set_buddy_state("idle")
@@ -1687,6 +1801,10 @@ class FenneNoteQt(QMainWindow):
         self.stop_transcriber()
         self.stop_level_worker()
         event.accept()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.update_log_drawer_geometry()
 
 
 def main() -> int:
