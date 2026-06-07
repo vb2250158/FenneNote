@@ -6,16 +6,26 @@ Set-Location $ScriptDir
 $VenvDir = ".venv-gpu"
 $IconPath = "assets\fennenote.ico"
 $DistDir = Join-Path $ScriptDir "dist\FenneNote"
-$DistConfigPath = Join-Path $DistDir "config.json"
-$ConfigBackupDir = $null
-$ConfigBackupPath = $null
+$RuntimeBackupDir = $null
+$RuntimeItems = @(
+    "config.json",
+    "transcripts",
+    "cache",
+    "reference-cache",
+    "voice-references",
+    "runs"
+)
 
-if (Test-Path -LiteralPath $DistConfigPath) {
-    $ConfigBackupDir = Join-Path ([System.IO.Path]::GetTempPath()) ("FenneNote-build-" + [System.Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $ConfigBackupDir | Out-Null
-    $ConfigBackupPath = Join-Path $ConfigBackupDir "config.json"
-    Copy-Item -LiteralPath $DistConfigPath -Destination $ConfigBackupPath -Force
-    Write-Host "Preserved existing runtime config: $DistConfigPath"
+if (Test-Path -LiteralPath $DistDir) {
+    $RuntimeBackupDir = Join-Path ([System.IO.Path]::GetTempPath()) ("FenneNote-build-" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $RuntimeBackupDir | Out-Null
+    foreach ($Item in $RuntimeItems) {
+        $Source = Join-Path $DistDir $Item
+        if (Test-Path -LiteralPath $Source) {
+            Copy-Item -LiteralPath $Source -Destination (Join-Path $RuntimeBackupDir $Item) -Recurse -Force
+            Write-Host "Preserved runtime data: $Source"
+        }
+    }
 }
 
 if (-not (Test-Path "$VenvDir\Scripts\python.exe")) {
@@ -44,11 +54,16 @@ try {
         qt_gui.py
 }
 finally {
-    if ($ConfigBackupPath -and (Test-Path -LiteralPath $ConfigBackupPath)) {
+    if ($RuntimeBackupDir -and (Test-Path -LiteralPath $RuntimeBackupDir)) {
         New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
-        Copy-Item -LiteralPath $ConfigBackupPath -Destination $DistConfigPath -Force
-        Remove-Item -LiteralPath $ConfigBackupDir -Recurse -Force
-        Write-Host "Restored runtime config: $DistConfigPath"
+        foreach ($Item in $RuntimeItems) {
+            $Backup = Join-Path $RuntimeBackupDir $Item
+            if (Test-Path -LiteralPath $Backup) {
+                Copy-Item -LiteralPath $Backup -Destination (Join-Path $DistDir $Item) -Recurse -Force
+                Write-Host "Restored runtime data: $(Join-Path $DistDir $Item)"
+            }
+        }
+        Remove-Item -LiteralPath $RuntimeBackupDir -Recurse -Force
     }
 }
 

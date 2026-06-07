@@ -92,6 +92,7 @@ GUI：
 
 - [快速上手](docs/QUICK_START.md)
 - [配置说明](docs/CONFIGURATION.md)
+- [QQ 混音虚拟麦克风路由](docs/AUDIO_ROUTING.md)
 - [模型说明](docs/MODELS.md)
 - [RabiRoute 接入](docs/RABIROUTE.md)
 - [开源发布检查清单](docs/OPEN_SOURCE_CHECKLIST.md)
@@ -117,6 +118,17 @@ FenneNote 麦克风转写
 
 完整接入说明见 [RabiRoute 接入](docs/RABIROUTE.md)。
 
+## QQ 混音虚拟麦克风
+
+如果 QQ 语音通话里需要朋友同时听到用户真实麦克风和 YeYu/Codex TTS，请使用 VoiceMeeter 或 VB-CABLE + VoiceMeeter 做混音虚拟麦克风。关键规则是：
+
+```text
+FenneNote 输入 = 用户物理麦克风
+QQ 麦克风 = VoiceMeeter Output/B1 或其他混音虚拟麦克风
+```
+
+不要把 FenneNote 的麦克风选择成混音虚拟设备，否则 TTS 可能被再次转写并回流到 Codex。详细拓扑、TTS guard 占位配置和验证步骤见 [QQ 混音虚拟麦克风路由](docs/AUDIO_ROUTING.md)。
+
 ## 公开发布安全
 
 公开仓库只保留脱敏模板和部署说明。提交到 GitHub 前请确认没有包含：
@@ -137,18 +149,20 @@ config.json         本机配置
 transcripts/        按天保存的转写文本
 cache/models/       Whisper 模型缓存
 cache/huggingface/  Hugging Face 下载缓存
-cache/temp/         临时文件
-cache/audio/        预留音频临时缓存
+cache/temp/         临时文件，只受“缓存保留分钟”清理
+cache/audio/        私有录音片段，用于以后训练/克隆自己的声线
 ```
 
 源码运行和打包版运行会分别读取各自目录下的 `config.json`。如果同时使用 `.\run_gui.ps1` 和 `dist\FenneNote\FenneNote.exe`，它们的配置互不共享。
+
+“保存录音片段”默认关闭，避免误存隐私。开启后，送去转写的片段会保存为 WAV 到 `cache/audio/`；这些音频已经过“麦克风音量放大”处理。`录音保留分钟` 最低 1 分钟，默认 10 分钟，用来给声纹建档、异步识别和人工命名留下安全窗口。`cache/audio/` 属于私有训练素材，不提交 GitHub。
 
 当前 GUI 可管理的模型见 [模型说明](docs/MODELS.md)。默认推荐 `small`，8GB 显存同时运行 Unity 时不建议常驻使用 `large-v3`。
 
 ## 开发验证
 
 ```powershell
-py -3.10 -m py_compile gui.py transcribe_mic.py
+py -3.10 -m py_compile qt_gui.py transcribe_mic.py
 ```
 
 构建 exe：
