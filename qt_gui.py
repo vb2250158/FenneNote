@@ -1152,6 +1152,9 @@ class FenneNoteQt(QMainWindow):
             candidate = root / raw_path
             if candidate.exists():
                 return candidate.resolve()
+            candidate = root / "voice-references" / "reference-index.json"
+            if candidate.exists():
+                return candidate.resolve()
             candidate = root / "OumuQ" / "voice-references" / "reference-index.json"
             if candidate.exists():
                 return candidate.resolve()
@@ -3637,6 +3640,8 @@ class FenneNoteQt(QMainWindow):
         url = self.oumuq_url.text().strip() or DEFAULT_CONFIG["oumuq_url"]
         outgoing = {key: value for key, value in payload.items() if not str(key).startswith("_")}
         character_id = str(outgoing.get("character_id") or self.selected_oumuq_character_id()).strip()
+        if character_id and not str(outgoing.get("character_id") or "").strip():
+            outgoing["character_id"] = character_id
         guard_seconds = float(payload.get("_guard_seconds", self.oumuq_guard_seconds.value()) or 0.0)
         self.prepare_playback_route(outgoing, status_prefix)
         try:
