@@ -17,36 +17,36 @@
 
 ```mermaid
 flowchart LR
-  subgraph GUI["qt_gui.py"]
+  subgraph GUI["界面层 qt_gui.py"]
     UI["配置页和状态页"]
     Api["本机 HTTP 入口\n/api/fennenote/*"]
     Preview["转写预览和日志"]
   end
 
-  subgraph Worker["transcribe_mic.py"]
-    Recorder["collect_phrases\n麦克风采样和切句"]
-    Provider["ASR provider\nWhisper / DashScope / MiMo"]
-    Post["转写后处理\n简繁转换 / 专名修正 / TTS guard"]
+  subgraph Worker["录音转写进程 transcribe_mic.py"]
+    Recorder["录音切句器\ncollect_phrases"]
+    Provider["识别供应商\n本地 Whisper / DashScope / MiMo"]
+    Post["转写后处理\n简繁转换 / 专名修正 / 回声保护"]
     Persist["每日文本\ntranscripts/YYYY-MM-DD.txt"]
   end
 
   subgraph External["外部文字输入"]
-    XiaoAI["XiaoAI / Open-XiaoAI / 云函数"]
-    Bridge["xiaoai-fennenote\n8799"]
+    XiaoAI["小爱音箱 / Open-XiaoAI / 云函数"]
+    Bridge["小爱转发桥\nxiaoai-fennenote:8799"]
   end
 
   subgraph Route["可选下游"]
-    RabiRoute["RabiRoute webhook"]
-    Manager["RabiRoute manager\n路由和 Agent 选项"]
+    RabiRoute["RabiRoute Webhook\n语音转写事件"]
+    Manager["RabiRoute 管理端\n路由和 Agent 选项"]
   end
 
   UI -->|"保存运行配置"| Worker
   Worker -->|"FN_STATUS / FN_TRANSCRIPT"| GUI
   Recorder --> Provider --> Post --> Persist
-  Post -->|"voice_transcript"| RabiRoute
+  Post -->|"语音转写事件"| RabiRoute
   XiaoAI --> Bridge --> Api --> Preview
   Api --> Persist
-  Api -->|"voice_transcript"| RabiRoute
+  Api -->|"外部文字转写事件"| RabiRoute
   UI -->|"刷新/切换绑定"| Manager
 ```
 
@@ -55,24 +55,24 @@ flowchart LR
 ```mermaid
 flowchart TD
   A["打开转写"] --> B["GUI 写入 config.json\n启动 transcribe_mic.py"]
-  B --> C["InputStream 读取麦克风 chunk"]
-  C --> D["应用 input_gain\n可选混合电脑声音"]
-  D --> E{"未开始录音?"}
-  E -->|"是"| F["维护 pre-roll\n更新动态底噪"]
-  F --> G{"chunk >= 动态录音线?"}
-  G -->|"否"| C
-  G -->|"是"| H["从 pre-roll 建立 Phrase buffer\n记录 started_at"]
-  E -->|"否"| I["追加 chunk\n更新 peak、voiced、silence"]
+  B --> C["音频流读取麦克风片段"]
+  C --> D["应用输入增益\n可选混合电脑声音"]
+  D --> E{"当前是否还没开始录音"}
+  E -->|"还没开始"| F["维护前置缓存\n更新动态底噪"]
+  F --> G{"当前音量是否达到录音线"}
+  G -->|"未达到"| C
+  G -->|"已达到"| H["从前置缓存建立语音片段\n记录开始时间"]
+  E -->|"已经开始"| I["追加音频片段\n更新峰值、有效语音和静音时长"]
   H --> I
-  I --> J{"达到切句条件?"}
-  J -->|"否"| C
-  J -->|"是"| K{"peak >= 转写线?"}
-  K -->|"否"| L["丢弃低强度片段\n回到监听"]
-  K -->|"是"| M["入队 Phrase"]
-  M --> N["TTS guard 音频级检查"]
-  N --> O["ASR provider 转写"]
+  I --> J{"是否达到切句条件"}
+  J -->|"继续等待"| C
+  J -->|"可以切句"| K{"片段峰值是否达到转写线"}
+  K -->|"未达到"| L["丢弃低强度片段\n回到监听"]
+  K -->|"已达到"| M["送入待转写队列"]
+  M --> N["回声保护\n音频级检查"]
+  N --> O["识别供应商转写"]
   O --> P["简繁转换和专名修正"]
-  P --> Q["文本过滤和 TTS 回声过滤"]
+  P --> Q["文本过滤和回声文本过滤"]
   Q --> R["写入每日文本\n推送 RabiRoute\n发送 GUI 预览"]
   L --> C
   R --> C
@@ -88,19 +88,19 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-  participant XA as XiaoAI/Open-XiaoAI
-  participant B as xiaoai-fennenote:8799
-  participant G as FenneNote HTTP:8793
-  participant UI as qt_gui.py
+  participant XA as 小爱或上游识别服务
+  participant B as 小爱转发桥 8799
+  participant G as FenneNote 本机入口 8793
+  participant UI as FenneNote 界面层
   participant RR as RabiRoute
 
-  XA->>B: POST /v1/xiaoai/decision { text, deviceName, sessionId }
-  B->>G: POST /api/fennenote/xiaoai
-  G->>UI: transcript_request_received
-  UI->>UI: apply_transcript_corrections
-  UI->>UI: append_line + preview
-  UI-->>RR: 可选 voice_transcript
-  B-->>XA: action ignore 或 intercept
+  XA->>B: 提交识别文本、设备名和会话号
+  B->>G: 转发到小爱文字入口
+  G->>UI: 发出外部文字事件
+  UI->>UI: 执行专名修正
+  UI->>UI: 写入每日文本并刷新预览
+  UI-->>RR: 可选推送语音转写事件
+  B-->>XA: 返回继续原生响应或拦截
 ```
 
 `decision` 默认只负责转发并返回 `ignore`，让小爱原生响应继续。只有配置 `XIAOAI_INTERCEPT_REGEX` 且文本命中时，桥接器才返回 `intercept`。
