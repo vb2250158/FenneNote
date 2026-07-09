@@ -1,0 +1,13 @@
+{
+  "name": "xiaoai-fennenote-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs",
+    "smoke": "node smoke-send.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
     "transcribe_pause_seconds": 0.5,
     "silence_seconds": 5.0,
     "input_gain": 1.0,
+    "xiaoai_level_gain": 10.0,
     "record_threshold": 0.01,
     "transcribe_threshold": 0.015,
     "rms_threshold": 0.01,
@@ -105,6 +106,18 @@ DEFAULT_CONFIG = {
     "api_model": "qwen3-asr-flash",
     "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "api_key": "",
+    "transcript_corrections_enabled": True,
+    "transcript_corrections": {
+        "森之灵": "森之宁",
+        "森之名": "森之宁",
+        "升之零": "森之宁",
+        "生之零": "森之宁",
+        "孙智宁": "森之宁",
+        "孙之宁": "森之宁",
+        "孙芝宁": "森之宁",
+        "森之林": "森之宁",
+        "森之岭": "森之宁",
+    },
     "reply_bubble_enabled": True,
     "reply_bubble_port": 8792,
     "reply_bubble_seconds": 3.0,
@@ -113,6 +126,8 @@ DEFAULT_CONFIG = {
     "rabiroute_url": "http://127.0.0.1:8791/webhook",
     "rabiroute_token": "",
     "rabiroute_source": "fennenote",
+    "rabiroute_manager_url": "http://127.0.0.1:8790",
+    "rabiroute_route_id": "",
 }
 
 MODEL_REPOSITORIES = {
@@ -496,6 +511,21 @@ def simplify_text(text: str, converter: OpenCC | None) -> str:
     if converter is None:
         return text
     return converter.convert(text)
+
+
+def apply_transcript_corrections(text: str, config: dict) -> str:
+    if not bool(config.get("transcript_corrections_enabled", True)):
+        return text
+    corrections = config.get("transcript_corrections", DEFAULT_CONFIG["transcript_corrections"])
+    if not isinstance(corrections, dict):
+        return text
+    corrected = text
+    for wrong, right in corrections.items():
+        wrong_text = str(wrong).strip()
+        right_text = str(right).strip()
+        if wrong_text and right_text:
+            corrected = corrected.replace(wrong_text, right_text)
+    return corrected
 
 
 def contains_cjk(text: str) -> bool:
@@ -1202,6 +1232,69 @@ def transcribe_phrase_with_dashscope(config: dict, phrase: Phrase, language: str
     return simplify_text(text, converter)
 
 
+def mimo_chat_completions_url(config: dict) -> str:
+    configured_base_url = str(config.get("api_base_url") or "").strip()
+    if not configured_base_url or "dashscope.aliyuncs.com" in configured_base_url:
+        configured_base_url = os.environ.get("MIMO_BASE_URL", "") or "https://api.xiaomimimo.com/v1"
+    base_url = configured_base_url.rstrip("/")
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
+
+def transcribe_phrase_with_mimo(config: dict, phrase: Phrase, language: str | None, converter: OpenCC | None) -> str:
+    api_key = os.environ.get("MIMO_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("MIMO_API_KEY is empty.")
+    model_name = str(config.get("api_model", "")).strip() or "mimo-v2.5-asr"
+    mimo_language = language if language in {"auto", "zh", "en"} else "auto"
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": phrase_to_audio_data_url(phrase, int(config["sample_rate"]))
+                        },
+                    }
+                ],
+            }
+        ],
+        "asr_options": {"language": mimo_language},
+    }
+    request = urllib.request.Request(
+        mimo_chat_completions_url(config),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "api-key": api_key,
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "FenneNote",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            response_text = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        error_text = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"MiMo ASR HTTP {exc.code}: {error_text[:500]}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"MiMo ASR request failed: {exc}") from exc
+
+    try:
+        response_payload = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"MiMo ASR returned non-JSON response: {response_text[:500]}") from exc
+    text = extract_dashscope_text(response_payload)
+    if not text:
+        raise RuntimeError(f"MiMo ASR response did not contain transcript text: {response_text[:500]}")
+    return simplify_text(text, converter)
+
+
 def rms(samples: np.ndarray) -> float:
     if samples.size == 0:
         return 0.0
@@ -1416,17 +1509,21 @@ def transcribe_loop(config: dict) -> None:
     model_source = str(config.get("model_source", "local") or "local").lower()
     if model_source == "api":
         api_provider = str(config.get("api_provider", config.get("api_provider_id", "")) or "").lower()
-        if api_provider not in {"dashscope", "千问 / dashscope"}:
-            raise RuntimeError(f"Unsupported API provider: {api_provider or '(empty)'}. DashScope is currently supported.")
-        if not str(config.get("api_key", "")).strip():
+        if api_provider not in {"dashscope", "千问 / dashscope", "mimo", "xiaomi_mimo", "xiaomi mimo"}:
+            raise RuntimeError(f"Unsupported API provider: {api_provider or '(empty)'}. DashScope and MiMo are currently supported.")
+        if api_provider in {"dashscope", "千问 / dashscope"} and not str(config.get("api_key", "")).strip():
             raise RuntimeError("DashScope API Key is empty.")
+        if api_provider in {"mimo", "xiaomi_mimo", "xiaomi mimo"} and not os.environ.get("MIMO_API_KEY", "").strip():
+            raise RuntimeError("MIMO_API_KEY is empty.")
         language = config.get("language_mode", config.get("language", "zh"))
         if language in {"auto", "", None}:
             language = None
         converter = OpenCC("t2s") if bool(config.get("simplify_chinese", True)) else None
         stop_event = threading.Event()
         phrases = collect_phrases(config, stop_event)
-        emit_status("api_ready", f"API 模型已就绪：DashScope / {config.get('api_model', 'qwen3-asr-flash')}")
+        provider_label = "MiMo" if api_provider in {"mimo", "xiaomi_mimo", "xiaomi mimo"} else "DashScope"
+        default_model = "mimo-v2.5-asr" if provider_label == "MiMo" else "qwen3-asr-flash"
+        emit_status("api_ready", f"API 模型已就绪：{provider_label} / {config.get('api_model', default_model)}")
         emit_status("output_ready", f"转写记录目录：{output_dir}")
         emit_status("cache_ready", f"本地缓存：{storage_dirs['cache']}")
 
@@ -1449,16 +1546,26 @@ def transcribe_loop(config: dict) -> None:
                 except Exception as exc:
                     emit_status("diarization_error", f"说话人分离失败，回退普通转写：{exc}")
                     try:
-                        text = transcribe_phrase_with_dashscope(config, phrase, language, converter)
+                        if api_provider in {"mimo", "xiaomi_mimo", "xiaomi mimo"}:
+                            text = transcribe_phrase_with_mimo(config, phrase, language, converter)
+                        else:
+                            text = transcribe_phrase_with_dashscope(config, phrase, language, converter)
                     except Exception as fallback_exc:
                         emit_status("api_error", f"API 转写失败：{fallback_exc}")
                         continue
             else:
                 try:
-                    text = transcribe_phrase_with_dashscope(config, phrase, language, converter)
+                    if api_provider in {"mimo", "xiaomi_mimo", "xiaomi mimo"}:
+                        text = transcribe_phrase_with_mimo(config, phrase, language, converter)
+                    else:
+                        text = transcribe_phrase_with_dashscope(config, phrase, language, converter)
                 except Exception as exc:
                     emit_status("api_error", f"API 转写失败：{exc}")
                     continue
+            text = apply_transcript_corrections(text, config)
+            for turn in speaker_turns:
+                if isinstance(turn, dict) and "text" in turn:
+                    turn["text"] = apply_transcript_corrections(str(turn["text"]), config)
             if not should_keep_text(text, language, config):
                 emit_status("discarded", "本段已转写但没有保留有效文字，已丢弃")
                 continue
@@ -1513,6 +1620,7 @@ def transcribe_loop(config: dict) -> None:
         )
         text = "".join(segment.text for segment in segments if should_keep_segment(segment)).strip()
         text = simplify_text(text, converter)
+        text = apply_transcript_corrections(text, config)
         if not should_keep_text(text, language, config):
             emit_status("discarded", "本段已转写但没有保留有效文字，已丢弃")
             continue

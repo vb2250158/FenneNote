@@ -63,6 +63,18 @@
   "api_model": "qwen3-asr-flash",
   "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
   "api_key": "",
+  "transcript_corrections_enabled": true,
+  "transcript_corrections": {
+    "森之灵": "森之宁",
+    "森之名": "森之宁",
+    "升之零": "森之宁",
+    "生之零": "森之宁",
+    "孙智宁": "森之宁",
+    "孙之宁": "森之宁",
+    "孙芝宁": "森之宁",
+    "森之林": "森之宁",
+    "森之岭": "森之宁"
+  },
   "reply_bubble_enabled": true,
   "reply_bubble_port": 8792,
   "reply_bubble_seconds": 3.0,
@@ -70,5 +82,7 @@
   "rabiroute_enabled": false,
   "rabiroute_url": "http://127.0.0.1:8791/webhook",
   "rabiroute_token": "",
-  "rabiroute_source": "fennenote"
+  "rabiroute_source": "fennenote",
+  "rabiroute_manager_url": "http://127.0.0.1:8790",
+  "rabiroute_route_id": ""
 }

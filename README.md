@@ -95,6 +95,7 @@ GUI：
 - [QQ 混音虚拟麦克风路由](docs/AUDIO_ROUTING.md)
 - [模型说明](docs/MODELS.md)
 - [RabiRoute 接入](docs/RABIROUTE.md)
+- [录音与转写架构](docs/RECORDING_TRANSCRIPTION_ARCHITECTURE.md)
 - [开源发布检查清单](docs/OPEN_SOURCE_CHECKLIST.md)
 - [排错指南](docs/TROUBLESHOOTING.md)
 

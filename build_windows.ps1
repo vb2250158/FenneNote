@@ -19,10 +19,11 @@ $RuntimeItems = @(
 if (Test-Path -LiteralPath $DistDir) {
     $RuntimeBackupDir = Join-Path ([System.IO.Path]::GetTempPath()) ("FenneNote-build-" + [System.Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $RuntimeBackupDir | Out-Null
+    $MovedDistDir = Join-Path $RuntimeBackupDir "FenneNote"
+    Move-Item -LiteralPath $DistDir -Destination $MovedDistDir -Force
     foreach ($Item in $RuntimeItems) {
-        $Source = Join-Path $DistDir $Item
+        $Source = Join-Path $MovedDistDir $Item
         if (Test-Path -LiteralPath $Source) {
-            Copy-Item -LiteralPath $Source -Destination (Join-Path $RuntimeBackupDir $Item) -Recurse -Force
             Write-Host "Preserved runtime data: $Source"
         }
     }
@@ -57,7 +58,7 @@ finally {
     if ($RuntimeBackupDir -and (Test-Path -LiteralPath $RuntimeBackupDir)) {
         New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
         foreach ($Item in $RuntimeItems) {
-            $Backup = Join-Path $RuntimeBackupDir $Item
+            $Backup = Join-Path (Join-Path $RuntimeBackupDir "FenneNote") $Item
             if (Test-Path -LiteralPath $Backup) {
                 Copy-Item -LiteralPath $Backup -Destination (Join-Path $DistDir $Item) -Recurse -Force
                 Write-Host "Restored runtime data: $(Join-Path $DistDir $Item)"

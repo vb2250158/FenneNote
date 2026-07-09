@@ -16,6 +16,8 @@ build/
 dist/
 *.spec
 logs/
+backups/
+out/
 *.log
 *.jsonl
 *.wav

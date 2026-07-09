@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -55,10 +56,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rabiroute_sdk import DEFAULT_MANAGER_URL, RabiRouteSdk
 from transcribe_mic import (
     DEFAULT_CONFIG,
     DOWNLOADABLE_MODELS,
     MODEL_PROFILES,
+    Phrase,
+    append_line,
+    apply_transcript_corrections,
     app_path,
     configure_local_storage,
     delete_model_cache,
@@ -66,6 +71,7 @@ from transcribe_mic import (
     load_config,
     model_cache_root,
     model_is_installed,
+    post_rabiroute_event,
     save_config as write_config,
 )
 
@@ -130,6 +136,8 @@ LANGUAGE_LABELS = {
     "ko": "韩文",
 }
 LANGUAGE_CODES = {label: code for code, label in LANGUAGE_LABELS.items()}
+INPUT_SOURCE_TYPE_LABELS = {"mic": "麦克风录音", "external_text": "外部文字输入"}
+INPUT_SOURCE_TYPE_CODES = {label: code for code, label in INPUT_SOURCE_TYPE_LABELS.items()}
 MODEL_SOURCE_LABELS = {"local": "本地模型", "api": "API 模型"}
 MODEL_SOURCE_CODES = {label: code for code, label in MODEL_SOURCE_LABELS.items()}
 AUDIO_ROUTE_PRESET_LABELS = {
@@ -138,7 +146,7 @@ AUDIO_ROUTE_PRESET_LABELS = {
     "mixed_transcription_input": "Mixed transcription - mic plus computer audio input",
 }
 AUDIO_ROUTE_PRESET_CODES = {label: code for code, label in AUDIO_ROUTE_PRESET_LABELS.items()}
-API_PROVIDER_LABELS = {"dashscope": "千问 / DashScope", "openai_compatible": "OpenAI Compatible"}
+API_PROVIDER_LABELS = {"dashscope": "千问 / DashScope", "mimo": "小米 MiMo", "openai_compatible": "OpenAI Compatible"}
 API_PROVIDER_CODES = {label: code for code, label in API_PROVIDER_LABELS.items()}
 API_MODEL_OPTIONS_BY_PROVIDER = {
     "dashscope": [
@@ -197,6 +205,17 @@ API_MODEL_OPTIONS_BY_PROVIDER = {
             "price": "OpenAI 官方列价：$0.006/分钟。",
             "speaker_support": "不返回多发言人时间段；不能直接生成说话人字幕，也不能单独识别具体是谁。",
             "note": "老模型，生态成熟；准确率通常不如 gpt-4o-transcribe。",
+        },
+    ],
+    "mimo": [
+        {
+            "id": "mimo-v2.5-asr",
+            "label": "小米 MiMo · mimo-v2.5-asr · 中英/方言/专名",
+            "tier": "MiMo V2.5 专用语音识别",
+            "best_for": "普通话、中文方言、中英混说、噪声环境和专名术语转写评估。",
+            "price": "以小米 MiMo API 平台当前计费为准；本配置不保存密钥。",
+            "speaker_support": "当前 FenneNote 只接普通转写；说话人分离仍沿用现有 DashScope diarization 路线。",
+            "note": "使用 MIMO_API_KEY 和可选 MIMO_BASE_URL 环境变量；默认 Base URL 为 https://api.xiaomimimo.com/v1。",
         },
     ],
 }
@@ -545,6 +564,19 @@ class NumericSlider(QWidget):
 
 
 class WaveWidget(QWidget):
+    PALETTES = {
+        "mic": {
+            "quiet": THEME["quiet_bar"],
+            "recording": THEME["teal"],
+            "transcribing": THEME["green"],
+        },
+        "xiaoai": {
+            "quiet": "#ffffff",
+            "recording": "#1f8fff",
+            "transcribing": "#1f8fff",
+        },
+    }
+
     def __init__(self) -> None:
         super().__init__()
         self.setMinimumHeight(140)
@@ -552,6 +584,20 @@ class WaveWidget(QWidget):
         self.record_threshold = 0.01
         self.transcribe_threshold = 0.015
         self.scale = 0.04
+        self.source_mode = "mic"
+
+    def set_source_mode(self, source_mode: str) -> None:
+        self.source_mode = source_mode if source_mode in self.PALETTES else "mic"
+        self.update()
+
+    def bar_color(self, value: float) -> QColor:
+        palette = self.PALETTES.get(self.source_mode, self.PALETTES["mic"])
+        color = palette["quiet"]
+        if value >= self.record_threshold:
+            color = palette["recording"]
+        if value >= self.transcribe_threshold:
+            color = palette["transcribing"]
+        return QColor(color)
 
     def push(self, level: float, record_threshold: float, transcribe_threshold: float) -> None:
         self.values.append(level)
@@ -586,12 +632,7 @@ class WaveWidget(QWidget):
         for value in values:
             normalized = min(value / self.scale, 1.0)
             height = max(2, normalized * (rect.height() - 8)) if value > 0 else 0
-            color = QColor(THEME["quiet_bar"])
-            if value >= self.record_threshold:
-                color = QColor(THEME["teal"])
-            if value >= self.transcribe_threshold:
-                color = QColor(THEME["green"])
-            painter.fillRect(QRectF(x, rect.height() - height, bar_width, height), color)
+            painter.fillRect(QRectF(x, rect.height() - height, bar_width, height), self.bar_color(value))
             x += bar_width + gap
 
 
@@ -599,8 +640,11 @@ class FenneNoteQt(QMainWindow):
     playback_finished = Signal(bool, str, dict)
     playback_request_received = Signal(dict)
     reply_request_received = Signal(dict)
+    transcript_request_received = Signal(dict)
+    xiaoai_level_received = Signal(float, float)
     voice_clone_sample_saved = Signal(bool, str, str)
     speaker_operation_finished = Signal(bool, str)
+    rabiroute_operation_finished = Signal(bool, str, dict)
 
     def __init__(self) -> None:
         super().__init__()
@@ -613,6 +657,7 @@ class FenneNoteQt(QMainWindow):
         self.process_thread: QThread | None = None
         self.process_worker: ProcessWorker | None = None
         self.running_config: dict | None = None
+        self.external_text_active = False
         self.model_thread: QThread | None = None
         self.model_worker: ModelOperationWorker | None = None
         self.model_operation_running = False
@@ -627,10 +672,13 @@ class FenneNoteQt(QMainWindow):
         self.force_quit = False
         self.tray_icon: QSystemTrayIcon | None = None
         self.tray_hide_notice_shown = False
+        self.rabiroute_routes_cache: list[dict] = []
+        self.rabiroute_identity_cache: dict = {}
         self.preview_noise_floor = 0.003
         self.display_level = 0.0
         self.display_raw_level = 0.0
         self.level_history: deque[float] = deque(maxlen=160)
+        self.transcript_preview_items: list[dict] = []
         self.buddy_state = ""
         self.buddy_state_changed_at = 0.0
         self.transcriber_activity_state = "idle"
@@ -639,8 +687,11 @@ class FenneNoteQt(QMainWindow):
         self.setup_tray()
         self.playback_request_received.connect(self.handle_playback_api_request)
         self.reply_request_received.connect(self.handle_reply_api_request)
+        self.transcript_request_received.connect(self.handle_external_transcript_request)
+        self.xiaoai_level_received.connect(self.handle_xiaoai_level)
         self.voice_clone_sample_saved.connect(self.on_voice_clone_sample_saved)
         self.speaker_operation_finished.connect(self.on_speaker_operation_finished)
+        self.rabiroute_operation_finished.connect(self.on_rabiroute_operation_finished)
         self.set_buddy_state("idle")
         self.apply_config_to_ui()
         self.start_playback_api_server()
@@ -1199,6 +1250,24 @@ class FenneNoteQt(QMainWindow):
                 return auth == f"Bearer {token}" or header_token == token
 
             def do_GET(self) -> None:
+                if self.path == "/api/fennenote/xiaoai/config":
+                    config = owner.collect_config()
+                    external_text_mode = owner.external_text_mode()
+                    self.send_json(200, {
+                        "ok": True,
+                        "inputSourceType": "external_text" if external_text_mode else "mic",
+                        "externalTextMode": external_text_mode,
+                        "externalTextActive": bool(owner.external_text_active),
+                        "xiaoaiWakeEnabled": bool(external_text_mode and owner.external_text_active),
+                        "recordThreshold": float(config.get("record_threshold", DEFAULT_CONFIG["record_threshold"])),
+                        "transcribeThreshold": float(config.get("transcribe_threshold", DEFAULT_CONFIG["transcribe_threshold"])),
+                        "transcribePauseSeconds": float(config.get("transcribe_pause_seconds", DEFAULT_CONFIG["transcribe_pause_seconds"])),
+                        "adaptiveThreshold": bool(config.get("adaptive_threshold", DEFAULT_CONFIG["adaptive_threshold"])),
+                        "inputGain": float(config.get("input_gain", DEFAULT_CONFIG["input_gain"])),
+                        "xiaoaiLevelGain": float(config.get("xiaoai_level_gain", DEFAULT_CONFIG["xiaoai_level_gain"])),
+                        "wakeCooldownMs": 0,
+                    })
+                    return
                 if self.path != "/healthz":
                     self.send_json(404, {"ok": False, "error": "not_found"})
                     return
@@ -1207,11 +1276,20 @@ class FenneNoteQt(QMainWindow):
                     "service": "fennenote-endpoint",
                     "playback": "/api/fennenote/playback",
                     "reply": "/api/fennenote/reply",
+                    "transcript": "/api/fennenote/transcript",
+                    "xiaoai": "/api/fennenote/xiaoai",
+                    "xiaoaiConfig": "/api/fennenote/xiaoai/config",
                 })
 
             def do_POST(self) -> None:
                 try:
-                    if self.path not in {"/api/fennenote/playback", "/api/fennenote/reply"}:
+                    if self.path not in {
+                        "/api/fennenote/playback",
+                        "/api/fennenote/reply",
+                        "/api/fennenote/transcript",
+                        "/api/fennenote/xiaoai",
+                        "/api/fennenote/xiaoai/level",
+                    }:
                         self.send_json(404, {"ok": False, "error": "not_found"})
                         return
                     if not self.authorized():
@@ -1224,6 +1302,17 @@ class FenneNoteQt(QMainWindow):
                         payload = json.loads(self.rfile.read(length).decode("utf-8"))
                         if not isinstance(payload, dict):
                             raise ValueError("body must be a JSON object")
+                        if self.path == "/api/fennenote/xiaoai/level":
+                            level = float(payload.get("level", 0.0) or 0.0)
+                            raw_level = float(payload.get("rawLevel", level) or level)
+                            owner.xiaoai_level_received.emit(level, raw_level)
+                            self.send_json(202, {
+                                "ok": True,
+                                "status": "queued",
+                                "provider": "fennenote_xiaoai_level",
+                                "level": level,
+                            })
+                            return
                         text = str(payload.get("text") or payload.get("message") or payload.get("content") or "").strip()
                         if not text:
                             raise ValueError("missing text")
@@ -1232,7 +1321,15 @@ class FenneNoteQt(QMainWindow):
                         return
                     request_id = f"fennenote-{int(time.time() * 1000)}"
                     payload["_request_id"] = request_id
-                    if self.path == "/api/fennenote/reply":
+                    if self.path in {"/api/fennenote/transcript", "/api/fennenote/xiaoai"}:
+                        if self.path == "/api/fennenote/xiaoai":
+                            payload.setdefault("source", "xiaoai")
+                            payload.setdefault("adapterType", "xiaoai")
+                        else:
+                            payload.setdefault("source", "external_text")
+                        owner.transcript_request_received.emit(payload)
+                        provider = "fennenote_transcript"
+                    elif self.path == "/api/fennenote/reply":
                         owner.reply_request_received.emit(payload)
                         provider = "fennenote_reply"
                     else:
@@ -1437,6 +1534,8 @@ class FenneNoteQt(QMainWindow):
         )
         self.audio_route_note.setWordWrap(True)
         self.audio_route_note.setStyleSheet("color: #6f5962;")
+        self.input_source_type_combo = QComboBox()
+        self.input_source_type_combo.addItems(list(INPUT_SOURCE_TYPE_CODES.keys()))
         self.source_combo = QComboBox()
         self.source_combo.addItems(list(MODEL_SOURCE_CODES.keys()))
         self.local_model_combo = QComboBox()
@@ -1453,13 +1552,54 @@ class FenneNoteQt(QMainWindow):
         self.language_combo = QComboBox()
         self.language_combo.addItems(list(LANGUAGE_CODES.keys()))
         self.simplify_check = ToggleSwitch("输出简体中文")
+        self.external_text_xiaoai_endpoint = QLineEdit()
+        self.external_text_xiaoai_endpoint.setReadOnly(True)
+        self.external_text_transcript_endpoint = QLineEdit()
+        self.external_text_transcript_endpoint.setReadOnly(True)
+        self.external_text_bridge_endpoint = QLineEdit()
+        self.external_text_bridge_endpoint.setReadOnly(True)
+        self.external_text_lan_endpoint = QLineEdit()
+        self.external_text_lan_endpoint.setReadOnly(True)
+        self.external_text_copy_bridge_button = QPushButton("复制地址")
+        self.external_text_apply_bridge_button = QPushButton("写入并重启 Open-XiaoAI")
+        self.external_text_actions = QWidget()
+        external_text_actions = QHBoxLayout(self.external_text_actions)
+        external_text_actions.setContentsMargins(0, 0, 0, 0)
+        external_text_actions.addWidget(self.external_text_copy_bridge_button)
+        external_text_actions.addWidget(self.external_text_apply_bridge_button)
+        self.xiaoai_level_gain = self.slider(1.0, 50.0, 0.5, 1, "x")
+        self.xiaoai_level_gain.setToolTip(
+            "只影响小爱音箱麦克风电平预览和自动唤醒判断。"
+            "例如原始电平 0.001，增益 10x 后按 0.010 跟录音阈值比较。"
+        )
+        self.external_text_raw_log = QPlainTextEdit()
+        self.external_text_raw_log.setReadOnly(True)
+        self.external_text_raw_log.setMaximumHeight(180)
+        self.external_text_raw_log.setPlaceholderText("小爱原始事件会显示在这里，包括 confidence、offset、payload、rawXiaoAI。")
+        self.external_text_clear_raw_log_button = QPushButton("清空原始日志")
+        self.external_text_payload_note = QLabel(
+            "上游发送 JSON：text/message/content 任一字段放转写文本；可选 source、deviceName、sessionId。"
+            "FenneNote 会直接写入转写记录和预览；没有原始音频时不做声纹或说话人分离。"
+        )
+        self.external_text_payload_note.setWordWrap(True)
+        self.external_text_payload_note.setStyleSheet("color: #6f5962;")
+        form.addRow("输入源类型", self.input_source_type_combo)
+        form.addRow("小爱桥接入口", self.external_text_bridge_endpoint)
+        form.addRow("局域网填写地址", self.external_text_lan_endpoint)
+        form.addRow("桥接配置", self.external_text_actions)
+        form.addRow("小爱电平增益", self.xiaoai_level_gain)
+        form.addRow("小爱入口", self.external_text_xiaoai_endpoint)
+        form.addRow("通用入口", self.external_text_transcript_endpoint)
+        form.addRow("原始事件", self.external_text_raw_log)
+        form.addRow("", self.external_text_clear_raw_log_button)
+        form.addRow("文字格式", self.external_text_payload_note)
         form.addRow("麦克风", self.mic_combo)
         form.addRow("音频路由预设", self.audio_route_preset_combo)
         form.addRow("", self.mixed_input_enabled)
         form.addRow("电脑声音输入", self.system_audio_combo)
         form.addRow("电脑声音增益", self.system_audio_gain)
         form.addRow("QQ 混音模式说明", self.audio_route_note)
-        form.addRow("模型来源", self.source_combo)
+        form.addRow("识别模型来源", self.source_combo)
         form.addRow("本地模型", self.local_model_combo)
         form.addRow("API 提供方", self.input_api_provider_combo)
         form.addRow("API 模型", self.input_api_model_combo)
@@ -1468,6 +1608,38 @@ class FenneNoteQt(QMainWindow):
         form.addRow("语言", self.language_combo)
         form.addRow("", self.simplify_check)
         layout.addWidget(group)
+        self.input_form = form
+        self.external_text_fields = [
+            self.external_text_bridge_endpoint,
+            self.external_text_lan_endpoint,
+            self.external_text_actions,
+            self.xiaoai_level_gain,
+            self.external_text_xiaoai_endpoint,
+            self.external_text_transcript_endpoint,
+            self.external_text_raw_log,
+            self.external_text_clear_raw_log_button,
+            self.external_text_payload_note,
+        ]
+        self.mic_input_fields = [
+            self.mic_combo,
+            self.audio_route_preset_combo,
+            self.mixed_input_enabled,
+            self.system_audio_combo,
+            self.system_audio_gain,
+            self.audio_route_note,
+            self.source_combo,
+            self.local_model_combo,
+            self.input_api_provider_combo,
+            self.input_api_model_combo,
+            self.input_api_model_detail,
+            self.compute_combo,
+            self.language_combo,
+            self.simplify_check,
+        ]
+        self.input_source_type_combo.currentTextChanged.connect(self.refresh_source_visibility)
+        self.external_text_copy_bridge_button.clicked.connect(self.copy_xiaoai_bridge_url)
+        self.external_text_apply_bridge_button.clicked.connect(self.apply_xiaoai_bridge_config)
+        self.external_text_clear_raw_log_button.clicked.connect(lambda: self.external_text_raw_log.clear())
         self.source_combo.currentTextChanged.connect(self.refresh_source_visibility)
         self.local_model_combo.currentIndexChanged.connect(self.on_local_model_selected)
         self.input_api_provider_combo.currentTextChanged.connect(self.refresh_input_api_models)
@@ -2015,18 +2187,47 @@ class FenneNoteQt(QMainWindow):
         self.route_source = QLineEdit()
         self.route_token = QLineEdit()
         self.route_token.setEchoMode(QLineEdit.Password)
+        self.route_manager_url = QLineEdit()
+        self.route_refresh_button = QPushButton("刷新路由")
+        self.route_rule_combo = QComboBox()
+        self.route_rule_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.route_rule_combo.setMaxVisibleItems(12)
+        self.route_rule_name = QLabel("未读取")
+        self.route_rule_name.setWordWrap(True)
+        self.route_rule_name.setStyleSheet(f"color: {THEME['muted']};")
+        self.route_cwd_combo = QComboBox()
+        self.route_cwd_combo.setEditable(True)
+        self.route_cwd_combo.setMaxVisibleItems(16)
+        self.route_cwd_combo.setToolTip("从 RabiRoute 扫描到的 Codex 工作目录中选择；也可以手动输入。留空表示使用 RabiRoute 根目录。")
+        self.route_thread_combo = QComboBox()
+        self.route_thread_combo.setEditable(True)
+        self.route_thread_combo.setMaxVisibleItems(20)
+        self.route_thread_combo.setToolTip("从 Codex 会话线程列表中选择；也可以手动输入。留空表示按路由名自动创建。")
+        self.route_apply_binding_button = QPushButton("切换 Codex 目录/线程")
         self.route_test_button = QPushButton("测试连接")
         self.route_status = QLabel("未测试")
         self.route_status.setWordWrap(True)
         self.route_status.setStyleSheet(f"color: {THEME['muted']};")
+        manager_row = QHBoxLayout()
+        manager_row.addWidget(self.route_manager_url, 1)
+        manager_row.addWidget(self.route_refresh_button)
         form.addRow("", self.route_enabled)
         form.addRow("推送 URL", self.route_url)
         form.addRow("来源 ID", self.route_source)
         form.addRow("访问令牌", self.route_token)
+        form.addRow("Manager URL", manager_row)
+        form.addRow("当前路由", self.route_rule_combo)
+        form.addRow("路由规则名", self.route_rule_name)
+        form.addRow("Codex 工作目录", self.route_cwd_combo)
+        form.addRow("Codex 会话线程", self.route_thread_combo)
+        form.addRow("Agent 绑定", self.route_apply_binding_button)
         form.addRow("连接测试", self.route_test_button)
         form.addRow("状态", self.route_status)
         layout.addWidget(group)
         self.route_test_button.clicked.connect(self.test_rabiroute_connection)
+        self.route_refresh_button.clicked.connect(self.refresh_rabiroute_routes)
+        self.route_rule_combo.currentIndexChanged.connect(self.on_rabiroute_route_selected)
+        self.route_apply_binding_button.clicked.connect(self.apply_rabiroute_agent_binding)
 
     def safe_identifier(self, value: str, fallback: str) -> str:
         cleaned = "".join(char.lower() if char.isalnum() else "_" for char in value.strip())
@@ -3046,6 +3247,7 @@ class FenneNoteQt(QMainWindow):
                     item.setForeground(QColor(THEME["muted"]))
                 self.speaker_table.setItem(row_index, column, item)
         self.speaker_table.resizeColumnsToContents()
+        self.refresh_transcript_preview()
 
     def slider(self, minimum: float, maximum: float, step: float, decimals: int = 1, suffix: str = "") -> NumericSlider:
         return NumericSlider(minimum, maximum, step, decimals, suffix)
@@ -3064,7 +3266,11 @@ class FenneNoteQt(QMainWindow):
         self.mixed_input_enabled.setChecked(bool(config.get("mixed_input_enabled", DEFAULT_CONFIG["mixed_input_enabled"])))
         self.set_combo_data(self.system_audio_combo, config.get("system_audio_device", DEFAULT_CONFIG["system_audio_device"]))
         self.system_audio_gain.setValue(float(config.get("system_audio_gain", DEFAULT_CONFIG["system_audio_gain"])))
-        self.source_combo.setCurrentText(MODEL_SOURCE_LABELS.get(str(config.get("model_source", "local")), "本地模型"))
+        model_source = str(config.get("model_source", "local"))
+        self.input_source_type_combo.setCurrentText(
+            INPUT_SOURCE_TYPE_LABELS["external_text"] if model_source == "external_text" else INPUT_SOURCE_TYPE_LABELS["mic"]
+        )
+        self.source_combo.setCurrentText(MODEL_SOURCE_LABELS.get(model_source, "本地模型"))
         provider_label = API_PROVIDER_LABELS.get(str(config.get("api_provider", "dashscope")), "千问 / DashScope")
         self.api_provider_combo.setCurrentText(provider_label)
         self.input_api_provider_combo.setCurrentText(provider_label)
@@ -3073,6 +3279,7 @@ class FenneNoteQt(QMainWindow):
         self.api_base_url.setText(str(config.get("api_base_url", "")))
         self.api_key.setText(str(config.get("api_key", "")))
         self.input_gain.setValue(float(config.get("input_gain", DEFAULT_CONFIG["input_gain"])))
+        self.xiaoai_level_gain.setValue(float(config.get("xiaoai_level_gain", DEFAULT_CONFIG["xiaoai_level_gain"])))
         self.record_threshold.setValue(float(config.get("record_threshold", 0.01)))
         self.transcribe_threshold.setValue(float(config.get("transcribe_threshold", 0.015)))
         self.adaptive_check.setChecked(bool(config.get("adaptive_threshold", True)))
@@ -3109,6 +3316,8 @@ class FenneNoteQt(QMainWindow):
         self.route_url.setText(str(config.get("rabiroute_url", DEFAULT_CONFIG["rabiroute_url"])))
         self.route_source.setText(str(config.get("rabiroute_source", DEFAULT_CONFIG["rabiroute_source"])))
         self.route_token.setText(str(config.get("rabiroute_token", "")))
+        default_manager_url = config.get("rabiroute_manager_url") or RabiRouteSdk.manager_url_from_webhook(self.route_url.text())
+        self.route_manager_url.setText(str(default_manager_url or DEFAULT_MANAGER_URL))
         self.refresh_api_models()
         self.refresh_input_api_models()
         self.set_selected_api_model(str(config.get("api_model", current_api_model_id(self.api_model_combo))))
@@ -3145,8 +3354,11 @@ class FenneNoteQt(QMainWindow):
         self.api_model_combo.blockSignals(True)
         populate_api_model_combo(self.api_model_combo, provider, current if current in models else models[0])
         self.api_model_combo.blockSignals(False)
-        if provider == "dashscope" and not self.api_base_url.text().strip():
+        current_base_url = self.api_base_url.text().strip()
+        if provider == "dashscope" and (not current_base_url or "xiaomimimo.com" in current_base_url):
             self.api_base_url.setText("https://dashscope.aliyuncs.com/compatible-mode/v1")
+        if provider == "mimo" and (not current_base_url or "dashscope.aliyuncs.com" in current_base_url):
+            self.api_base_url.setText("https://api.xiaomimimo.com/v1")
         self.update_api_model_detail()
         self.update_provider_status()
 
@@ -3250,7 +3462,7 @@ class FenneNoteQt(QMainWindow):
 
     def local_model_installed(self, model_name: str, config: dict | None = None) -> bool:
         check_config = config or self.collect_config()
-        if check_config.get("model_source") == "api":
+        if check_config.get("model_source") in {"api", "external_text"}:
             return True
         try:
             return model_is_installed(check_config, model_name)
@@ -3258,7 +3470,159 @@ class FenneNoteQt(QMainWindow):
             return False
 
     def local_model_mode(self) -> bool:
-        return MODEL_SOURCE_CODES.get(self.source_combo.currentText(), "local") == "local"
+        return not self.external_text_mode() and MODEL_SOURCE_CODES.get(self.source_combo.currentText(), "local") == "local"
+
+    def external_text_mode(self) -> bool:
+        return INPUT_SOURCE_TYPE_CODES.get(self.input_source_type_combo.currentText(), "mic") == "external_text"
+
+    def set_form_field_visible(self, form: QFormLayout, field: QWidget, visible: bool) -> None:
+        field.setVisible(visible)
+        label = form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+
+    def local_lan_ip(self) -> str:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                ip = sock.getsockname()[0]
+                if ip and not ip.startswith("127."):
+                    return ip
+        except Exception:
+            pass
+        try:
+            for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = item[4][0]
+                if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                    return ip
+        except Exception:
+            pass
+        return "127.0.0.1"
+
+    def xiaoai_bridge_local_url(self) -> str:
+        return "http://127.0.0.1:8799/v1/xiaoai/decision"
+
+    def xiaoai_bridge_lan_url(self) -> str:
+        return f"http://{self.local_lan_ip()}:8799/v1/xiaoai/decision"
+
+    def copy_xiaoai_bridge_url(self) -> None:
+        url = self.xiaoai_bridge_lan_url()
+        QApplication.clipboard().setText(url)
+        self.status_label.setText("已复制小爱桥接局域网地址")
+        self.append_log(f"已复制小爱桥接地址：{url}")
+
+    def rabiroute_xiaoai_bridge_dir(self) -> Path | None:
+        candidates: list[Path] = []
+        for base in [Path.cwd(), Path(__file__).resolve().parent]:
+            candidates.extend([base, *base.parents])
+        for base in candidates:
+            route_dir = base / "RabiRoute" / "plugin-adapters" / "xiaoai-rabiroute"
+            if route_dir.exists():
+                return route_dir
+        return None
+
+    def apply_xiaoai_bridge_config(self) -> None:
+        bridge_dir = self.rabiroute_xiaoai_bridge_dir()
+        if bridge_dir is None:
+            QMessageBox.warning(
+                self,
+                "小爱桥接",
+                "未找到相邻的 RabiRoute/plugin-adapters/xiaoai-rabiroute 目录。请先确认 RabiRoute 与 FenneNote 位于同一个工作区。",
+            )
+            return
+        replacements = [
+            (bridge_dir / "docker-compose.open-xiaoai.yml", "http://host.docker.internal:8798", "http://host.docker.internal:8799"),
+            (bridge_dir / "open-xiaoai-migpt-rabiroute.config.ts", "http://host.docker.internal:8798", "http://host.docker.internal:8799"),
+            (bridge_dir / "vendor" / "open-xiaoai" / "examples" / "migpt" / "config.ts", "http://host.docker.internal:8798", "http://host.docker.internal:8799"),
+        ]
+        changed: list[str] = []
+        missing: list[str] = []
+        try:
+            for file_path, old, new in replacements:
+                if not file_path.exists():
+                    missing.append(str(file_path))
+                    continue
+                text = file_path.read_text(encoding="utf-8")
+                if old in text:
+                    file_path.write_text(text.replace(old, new), encoding="utf-8")
+                    changed.append(str(file_path))
+            restart_message = self.restart_open_xiaoai_runtime(bridge_dir)
+            if changed:
+                message = "已把 Open-XiaoAI 桥接目标改到 FenneNote 8799。"
+            else:
+                message = "Open-XiaoAI 配置已经指向 8799，或没有找到 8798 旧地址。"
+            message += "\n" + restart_message
+            if missing:
+                message += "\n未找到：" + "\n".join(missing)
+            self.status_label.setText("小爱桥接配置已刷新")
+            self.append_log(message.replace("\n", " "))
+            QMessageBox.information(self, "小爱桥接", message)
+        except Exception as exc:
+            QMessageBox.warning(self, "小爱桥接", f"刷新配置失败：{exc}")
+
+    def restart_open_xiaoai_runtime(self, bridge_dir: Path) -> str:
+        migpt_dir = bridge_dir / "vendor" / "open-xiaoai" / "examples" / "migpt"
+        if not migpt_dir.exists():
+            return "未找到本地 Open-XiaoAI migpt 目录；如果使用 Docker，请手动重启容器。"
+
+        stop_script = (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -in @('node.exe','cmd.exe','py.exe','python.exe') -and "
+            "$_.CommandLine -and ($_.CommandLine -like '*migpt/index.ts*' -or "
+            "$_.CommandLine -like '*reverse-tunnel.py*' -or "
+            "$_.CommandLine -like '*start-open-xiaoai-fennenote*') } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", stop_script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+        launcher = bridge_dir / "start-open-xiaoai-fennenote.cmd"
+        if not launcher.exists():
+            launcher.write_text(
+                '@echo off\n'
+                'set RABIROUTE_XIAOAI_BRIDGE_URL=http://127.0.0.1:8799\n'
+                'cd /d "%~dp0vendor\\open-xiaoai\\examples\\migpt"\n'
+                'call node_modules\\.bin\\tsx.cmd migpt/index.ts >> "%~dp0open-xiaoai-live.log" 2>> "%~dp0open-xiaoai-live.err.log"\n',
+                encoding="utf-8",
+            )
+        subprocess.Popen(
+            [str(launcher)],
+            cwd=bridge_dir,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        subprocess.Popen(
+            ["py", "-3", "reverse-tunnel.py"],
+            cwd=bridge_dir,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return "已自动重启本地 Open-XiaoAI / MiGPT 服务和反向隧道；音箱侧如果仍未连接，请重启音箱上的 open-xiaoai client。"
+
+    def stop_xiaoai_bridge_runtime(self) -> str:
+        stop_script = (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -in @('node.exe','cmd.exe','py.exe','python.exe') -and "
+            "$_.CommandLine -and ($_.CommandLine -like '*xiaoai-fennenote*' -or "
+            "$_.CommandLine -like '*migpt/index.ts*' -or "
+            "$_.CommandLine -like '*reverse-tunnel.py*' -or "
+            "$_.CommandLine -like '*start-open-xiaoai-fennenote*') } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", stop_script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode == 0:
+            return "小爱桥接 / Open-XiaoAI 已停止"
+        detail = (result.stderr or result.stdout or "").strip()
+        return f"小爱桥接停止命令返回异常：{detail[:180]}"
 
     def update_start_button_state(self) -> None:
         if not hasattr(self, "start_button"):
@@ -3276,7 +3640,7 @@ class FenneNoteQt(QMainWindow):
         self.update_model_overview()
 
     def transcriber_running(self) -> bool:
-        return bool(self.process_thread and self.process_thread.isRunning())
+        return self.external_text_active or bool(self.process_thread and self.process_thread.isRunning())
 
     def set_start_button_mode(self, running: bool) -> None:
         text = "停止" if running else "开始"
@@ -3396,17 +3760,39 @@ class FenneNoteQt(QMainWindow):
         self.model_worker = None
 
     def refresh_source_visibility(self) -> None:
-        api_mode = MODEL_SOURCE_CODES.get(self.source_combo.currentText(), "local") == "api"
-        self.local_model_combo.setVisible(not api_mode)
-        self.input_api_provider_combo.setVisible(api_mode)
-        self.input_api_model_combo.setVisible(api_mode)
-        self.input_api_model_detail.setVisible(api_mode)
+        source = MODEL_SOURCE_CODES.get(self.source_combo.currentText(), "local")
+        external_mode = self.external_text_mode()
+        api_mode = source == "api"
+        if hasattr(self, "input_form"):
+            port = int(self.config_data.get("playback_api_port", DEFAULT_CONFIG["playback_api_port"]))
+            self.external_text_bridge_endpoint.setText(self.xiaoai_bridge_local_url())
+            self.external_text_lan_endpoint.setText(self.xiaoai_bridge_lan_url())
+            self.external_text_xiaoai_endpoint.setText(f"http://127.0.0.1:{port}/api/fennenote/xiaoai")
+            self.external_text_transcript_endpoint.setText(f"http://127.0.0.1:{port}/api/fennenote/transcript")
+            for field in self.external_text_fields:
+                self.set_form_field_visible(self.input_form, field, external_mode)
+            for field in self.mic_input_fields:
+                self.set_form_field_visible(self.input_form, field, not external_mode)
+            self.set_form_field_visible(self.input_form, self.local_model_combo, not external_mode and not api_mode)
+            self.set_form_field_visible(self.input_form, self.input_api_provider_combo, not external_mode and api_mode)
+            self.set_form_field_visible(self.input_form, self.input_api_model_combo, not external_mode and api_mode)
+            self.set_form_field_visible(self.input_form, self.input_api_model_detail, not external_mode and api_mode)
+        self.update_wave_source_mode()
         self.update_start_button_state()
 
+    def update_wave_source_mode(self, mode: str | None = None) -> None:
+        mode = mode or self.active_level_source()
+        if hasattr(self, "wave"):
+            self.wave.set_source_mode(mode)
+        if hasattr(self, "trigger_wave"):
+            self.trigger_wave.set_source_mode(mode)
+
     def update_provider_status(self) -> None:
-        key_state = "Key 已填写" if self.api_key.text().strip() else "Key 未填写"
+        provider = self.selected_api_provider_code()
+        key_ready = bool(os.environ.get("MIMO_API_KEY", "").strip()) if provider == "mimo" else bool(self.api_key.text().strip())
+        key_state = "Key 已填写" if key_ready else ("MIMO_API_KEY 未设置" if provider == "mimo" else "Key 未填写")
         enabled = "启用" if self.api_enabled_check.isChecked() else "未启用"
-        option = api_model_option(self.selected_api_provider_code(), self.selected_api_model_id())
+        option = api_model_option(provider, self.selected_api_model_id())
         self.provider_status.setText(f"{self.api_provider_id.text().strip() or '未命名'} / {self.api_provider_combo.currentText()} / {option['id']} / {enabled} / {key_state}")
         self.update_model_overview()
 
@@ -3422,8 +3808,9 @@ class FenneNoteQt(QMainWindow):
         if source == "api":
             provider = str(config.get("api_provider", config.get("api_provider_id", "dashscope")))
             provider_label = API_PROVIDER_LABELS.get(provider, provider or "DashScope")
-            model_id = str(config.get("api_model", "qwen3-asr-flash") or "qwen3-asr-flash")
-            key_ready = bool(str(config.get("api_key", "")).strip())
+            default_model = "mimo-v2.5-asr" if provider == "mimo" else "qwen3-asr-flash"
+            model_id = str(config.get("api_model", default_model) or default_model)
+            key_ready = bool(os.environ.get("MIMO_API_KEY", "").strip()) if provider == "mimo" else bool(str(config.get("api_key", "")).strip())
             self.overview_source_label.setText(f"API · {provider_label}")
             self.overview_model_label.setText(model_id)
             if running:
@@ -3431,10 +3818,16 @@ class FenneNoteQt(QMainWindow):
                 detail = "后台正在使用这个 API 模型接收麦克风分段并转写。"
             elif key_ready:
                 state = "Key 已填写，可开始"
-                detail = "点击开始会使用该千问模型进行 API 转写。"
+                detail = f"点击开始会使用 {provider_label} 模型进行 API 转写。"
             else:
                 state = "Key 未填写，不能开始"
-                detail = "请先在模型页或输入页填入阿里云 DashScope API Key。"
+                detail = "请先设置环境变量 MIMO_API_KEY。" if provider == "mimo" else "请先在模型页或输入页填入阿里云 DashScope API Key。"
+        elif source == "external_text":
+            port = int(config.get("playback_api_port", DEFAULT_CONFIG["playback_api_port"]))
+            self.overview_source_label.setText("外部文字")
+            self.overview_model_label.setText("小爱 / 云函数")
+            state = "入口已就绪"
+            detail = f"POST 到 http://127.0.0.1:{port}/api/fennenote/xiaoai 或 /api/fennenote/transcript。收到文本后直接写入转写记录。"
         else:
             model_name = str(config.get("model", DEFAULT_CONFIG["model"]))
             installed = self.local_model_installed(model_name, config)
@@ -3499,13 +3892,14 @@ class FenneNoteQt(QMainWindow):
         config = DEFAULT_CONFIG.copy()
         config.update(load_config(CONFIG_PATH))
         model_name = self.local_model_combo.currentData() or config.get("model", DEFAULT_CONFIG["model"])
+        model_source = "external_text" if self.external_text_mode() else MODEL_SOURCE_CODES.get(self.source_combo.currentText(), "local")
         record = self.record_threshold.value()
         config.update(
             {
                 "model": model_name,
                 "output_dir": self.output_dir_edit.text().strip() or DEFAULT_CONFIG["output_dir"],
                 "cache_dir": self.cache_dir_edit.text().strip() or DEFAULT_CONFIG["cache_dir"],
-                "model_source": MODEL_SOURCE_CODES.get(self.source_combo.currentText(), "local"),
+                "model_source": model_source,
                 "api_provider": API_PROVIDER_CODES.get(self.api_provider_combo.currentText(), "dashscope"),
                 "api_provider_id": self.api_provider_id.text().strip() or API_PROVIDER_CODES.get(self.api_provider_combo.currentText(), "dashscope"),
                 "api_provider_enabled": self.api_enabled_check.isChecked(),
@@ -3520,6 +3914,7 @@ class FenneNoteQt(QMainWindow):
                 "simplify_chinese": self.simplify_check.isChecked(),
                 "adaptive_threshold": self.adaptive_check.isChecked(),
                 "input_gain": round(self.input_gain.value(), 1),
+                "xiaoai_level_gain": round(self.xiaoai_level_gain.value(), 1),
                 "record_threshold": round(record, 4),
                 "transcribe_threshold": round(max(record, self.transcribe_threshold.value()), 4),
                 "rms_threshold": round(record, 4),
@@ -3560,6 +3955,8 @@ class FenneNoteQt(QMainWindow):
                 "rabiroute_url": self.route_url.text().strip(),
                 "rabiroute_token": self.route_token.text().strip(),
                 "rabiroute_source": self.route_source.text().strip() or "fennenote",
+                "rabiroute_manager_url": self.route_manager_url.text().strip() or DEFAULT_MANAGER_URL,
+                "rabiroute_route_id": str(self.route_rule_combo.currentData() or ""),
             }
         )
         return config
@@ -3578,10 +3975,12 @@ class FenneNoteQt(QMainWindow):
         self.api_enabled_check.setChecked(True)
         self.source_combo.setCurrentText("API 模型")
         self.save_config()
-        self.status_label.setText("已切换到 API Provider；开始后将使用千问 ASR")
-        self.append_log("已切换到 API Provider；开始后将使用千问 ASR")
+        provider_label = self.api_provider_combo.currentText()
+        self.status_label.setText(f"已切换到 API Provider；开始后将使用 {provider_label} ASR")
+        self.append_log(f"已切换到 API Provider；开始后将使用 {provider_label} ASR")
 
     def validate_api_provider(self) -> None:
+        provider = self.selected_api_provider_code()
         missing = []
         if not self.api_provider_id.text().strip():
             missing.append("Provider ID")
@@ -3589,12 +3988,15 @@ class FenneNoteQt(QMainWindow):
             missing.append("模型")
         if not self.api_base_url.text().strip():
             missing.append("Base URL")
-        if not self.api_key.text().strip():
+        if provider == "mimo":
+            if not os.environ.get("MIMO_API_KEY", "").strip():
+                missing.append("环境变量 MIMO_API_KEY")
+        elif not self.api_key.text().strip():
             missing.append("API Key")
         if missing:
             QMessageBox.warning(self, "Provider 配置", "还缺少：" + ", ".join(missing))
         else:
-            QMessageBox.information(self, "Provider 配置", "字段完整。点击开始后会用选中的千问模型进行 API 转写。")
+            QMessageBox.information(self, "Provider 配置", f"字段完整。点击开始后会用选中的 {self.api_provider_combo.currentText()} 模型进行 API 转写。")
 
     def write_tts_guard_for_playback(self, text: str, character_id: str, guard_seconds: float) -> Path:
         path = self.tts_guard_path_from_ui()
@@ -3730,6 +4132,7 @@ class FenneNoteQt(QMainWindow):
         request_id = str(payload.get("_request_id", "")).strip()
         self.oumuq_status.setText(f"收到 RabiRoute 播放请求：{request_id or 'local'}")
         self.append_log(f"收到 RabiRoute 播放请求：{payload.get('text', '')}")
+        self.append_rabiroute_reply_preview(payload)
         self.dispatch_playback_request(payload, "RabiRoute 播放请求")
 
     def handle_reply_api_request(self, payload: dict) -> None:
@@ -3740,10 +4143,114 @@ class FenneNoteQt(QMainWindow):
         message = f"{title}：{text}" if title else text
         self.status_label.setText(message[:120])
         self.append_log(f"收到 RabiRoute 文字反写：{message}")
+        self.append_rabiroute_reply_preview(payload)
         if hasattr(self, "bubble_enabled") and self.bubble_enabled.isChecked():
             timeout_ms = int(max(1.0, self.bubble_seconds.value()) * 1000) if hasattr(self, "bubble_seconds") else 3000
             point = self.mapToGlobal(QPoint(24, max(24, self.height() - 96)))
             QToolTip.showText(point, message, self, self.rect(), timeout_ms)
+
+    def rabiroute_reply_display_name(self, payload: dict) -> str:
+        for key in ("agentRoleName", "personaName", "roleName", "title", "sender", "routeProfileName", "agentRoleId"):
+            value = str(payload.get(key) or "").strip()
+            if not value or value == "RabiRoute":
+                continue
+            if value.endswith(" 路由"):
+                value = value[:-3].strip()
+            elif value.endswith("路由"):
+                value = value[:-2].strip()
+            if value:
+                return value
+        return "RabiRoute"
+
+    def append_rabiroute_reply_preview(self, payload: dict) -> None:
+        text = str(payload.get("text") or payload.get("message") or payload.get("content") or "").strip()
+        if not text:
+            return
+        name = self.rabiroute_reply_display_name(payload)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.append_transcript_preview_item({
+            "kind": "rabiroute_reply",
+            "time": timestamp,
+            "name": name,
+            "text": text,
+        })
+
+    def handle_external_transcript_request(self, payload: dict) -> None:
+        text = str(payload.get("text") or payload.get("message") or payload.get("content") or "").strip()
+        if not text:
+            return
+        source = str(payload.get("source") or "external_text").strip() or "external_text"
+        if not self.external_text_mode():
+            self.append_log(f"忽略{source}文字写入：当前输入源不是外部文字输入。")
+            return
+        now = datetime.now()
+        started_at = now
+        ended_at = now
+        device_name = str(payload.get("sourceDeviceName") or payload.get("deviceName") or "").strip()
+        title = "小爱文字" if source == "xiaoai" else "外部文字"
+        if device_name:
+            title = f"{title} / {device_name}"
+        config = self.collect_config()
+        text = apply_transcript_corrections(text, config)
+        append_line(self.output_dir_from_ui(), started_at, text, None)
+        route_config = config.copy()
+        route_config["rabiroute_source"] = source
+        phrase = Phrase(audio=np.zeros(0, dtype=np.float32), started_at=started_at, ended_at=ended_at, peak=0.0)
+        post_rabiroute_event(route_config, phrase, text, None, [])
+        self.append_transcript_preview({
+            "started_at": started_at.isoformat(),
+            "time": f"{started_at:%H:%M:%S}",
+            "text": text,
+            "speaker": {},
+            "speaker_turns": [],
+        })
+        self.status_label.setText(f"收到{title}：{text[:80]}")
+        self.trigger_state_label.setText(f"状态：收到{title}，已写入转写")
+        self.append_log(f"收到{title}转写：{text}")
+        self.append_external_text_raw_log(payload)
+        self.transcriber_activity_state = "written"
+        self.set_buddy_state("writing")
+        QTimer.singleShot(1200, lambda: self.set_buddy_state("listening"))
+
+    def append_external_text_raw_log(self, payload: dict) -> None:
+        if not hasattr(self, "external_text_raw_log"):
+            return
+        try:
+            text = str(payload.get("text") or payload.get("message") or payload.get("content") or "").strip()
+            source = str(payload.get("source") or payload.get("adapterType") or "external_text")
+            confidence = payload.get("confidence")
+            header = ""
+            if confidence is not None:
+                try:
+                    header = f"{source} / confidence {float(confidence):.3f}"
+                except (TypeError, ValueError):
+                    header = f"{source} / confidence {confidence}"
+            else:
+                header = source
+            event = {
+                "received_at": datetime.now().isoformat(timespec="seconds"),
+                "summary": {
+                    "source": source,
+                    "text": text,
+                    "confidence": confidence,
+                    "beginOffset": payload.get("beginOffset"),
+                    "endOffset": payload.get("endOffset"),
+                    "originText": payload.get("originText"),
+                    "deviceName": payload.get("deviceName") or payload.get("sourceDeviceName"),
+                    "sessionId": payload.get("sessionId"),
+                    "messageId": payload.get("messageId"),
+                },
+                "payload": payload,
+            }
+            self.external_text_raw_log.appendPlainText(
+                f"[{datetime.now():%H:%M:%S}] {header}  {text}\n"
+                + json.dumps(event, ensure_ascii=False, indent=2)
+                + "\n"
+            )
+            scrollbar = self.external_text_raw_log.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+        except Exception as exc:
+            self.append_log(f"小爱原始事件显示失败：{exc}")
 
     def submit_oumuq_playback(self) -> None:
         text = self.oumuq_test_text.toPlainText().strip()
@@ -3818,6 +4325,182 @@ class FenneNoteQt(QMainWindow):
             self.register_oumuq_output_samples(response_data)
         if not ok:
             QMessageBox.warning(self, "OumuQ", message)
+
+    def current_rabiroute_route_id(self) -> str:
+        return str(self.route_rule_combo.currentData() or "").strip()
+
+    def selected_rabiroute_route(self, route_id: str | None = None) -> dict:
+        target_id = (route_id or self.current_rabiroute_route_id()).strip()
+        for route in self.rabiroute_routes_cache:
+            if RabiRouteSdk.route_id(route) == target_id:
+                return route
+        return {}
+
+    def set_editable_combo_values(self, combo: QComboBox, values: list[str], current: str) -> None:
+        current_text = current.strip()
+        clean_values = []
+        for value in ["", *values]:
+            text = str(value or "").strip()
+            if text not in clean_values:
+                clean_values.append(text)
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItems(clean_values)
+            combo.setEditText(current_text)
+        finally:
+            combo.blockSignals(False)
+
+    def update_rabiroute_route_label(self, route: dict, reason: str = "") -> None:
+        if not route:
+            self.route_rule_name.setText("未匹配到路由规则")
+            return
+        name = RabiRouteSdk.route_display_name(route)
+        route_id = RabiRouteSdk.route_id(route)
+        suffix = f"\n匹配方式：{reason}" if reason else ""
+        self.route_rule_name.setText(f"{name}（{route_id}）{suffix}")
+
+    def refresh_rabiroute_routes(self, *_args: object) -> None:
+        manager_url = self.route_manager_url.text().strip() or RabiRouteSdk.manager_url_from_webhook(self.route_url.text())
+        self.route_manager_url.setText(manager_url)
+        selected_id = self.current_rabiroute_route_id() or str(self.config_data.get("rabiroute_route_id", ""))
+        self.start_rabiroute_operation(
+            "refresh",
+            {
+                "manager_url": manager_url,
+                "webhook_url": self.route_url.text().strip(),
+                "selected_route_id": selected_id,
+            },
+        )
+
+    def on_rabiroute_route_selected(self, *_args: object) -> None:
+        route_id = self.current_rabiroute_route_id()
+        if not route_id:
+            return
+        route = self.selected_rabiroute_route(route_id)
+        self.update_rabiroute_route_label(route, "手动选择")
+        self.start_rabiroute_operation(
+            "options",
+            {
+                "manager_url": self.route_manager_url.text().strip() or DEFAULT_MANAGER_URL,
+                "route_id": route_id,
+            },
+        )
+
+    def apply_rabiroute_agent_binding(self, *_args: object) -> None:
+        route_id = self.current_rabiroute_route_id()
+        if not route_id:
+            QMessageBox.warning(self, "RabiRoute", "请先刷新并选择一个 RabiRoute 路由。")
+            return
+        self.start_rabiroute_operation(
+            "apply_binding",
+            {
+                "manager_url": self.route_manager_url.text().strip() or DEFAULT_MANAGER_URL,
+                "route_id": route_id,
+                "codex_cwd": self.route_cwd_combo.currentText().strip(),
+                "codex_thread_name": self.route_thread_combo.currentText().strip(),
+            },
+        )
+
+    def start_rabiroute_operation(self, operation: str, payload: dict) -> None:
+        self.route_refresh_button.setEnabled(False)
+        self.route_apply_binding_button.setEnabled(False)
+        self.route_status.setText("正在请求 RabiRoute...")
+
+        def worker() -> None:
+            try:
+                manager_url = str(payload.get("manager_url") or DEFAULT_MANAGER_URL)
+                sdk = RabiRouteSdk(manager_url)
+                identity = sdk.get_identity()
+                guid = str(identity.get("guid", ""))
+                result: dict = {"operation": operation, "identity": identity}
+                if operation == "refresh":
+                    routes = sdk.get_routes(guid)
+                    match = sdk.match_route_for_webhook(str(payload.get("webhook_url") or ""), routes)
+                    selected_route_id = str(payload.get("selected_route_id") or "")
+                    route = next((item for item in routes if RabiRouteSdk.route_id(item) == selected_route_id), None)
+                    reason = "已保存选择" if route else ""
+                    if route is None and match is not None:
+                        route = match.route
+                        reason = match.reason
+                    options = sdk.get_agent_options(RabiRouteSdk.route_id(route), guid) if route else {}
+                    result.update({"routes": routes, "route": route or {}, "matchReason": reason, "options": options})
+                    self.rabiroute_operation_finished.emit(True, "路由列表已刷新", result)
+                    return
+                if operation == "options":
+                    route_id = str(payload.get("route_id") or "")
+                    options = sdk.get_agent_options(route_id, guid)
+                    result.update({"routeId": route_id, "options": options})
+                    self.rabiroute_operation_finished.emit(True, "Agent 选项已刷新", result)
+                    return
+                if operation == "apply_binding":
+                    route_id = str(payload.get("route_id") or "")
+                    sdk.set_agent_binding(
+                        route_id,
+                        guid=guid,
+                        codex_cwd=str(payload.get("codex_cwd") or ""),
+                        codex_thread_name=str(payload.get("codex_thread_name") or ""),
+                    )
+                    options = sdk.get_agent_options(route_id, guid)
+                    result.update({"routeId": route_id, "options": options})
+                    self.rabiroute_operation_finished.emit(True, "Codex 工作目录/线程已切换", result)
+                    return
+                raise RuntimeError(f"未知 RabiRoute 操作：{operation}")
+            except Exception as exc:
+                self.rabiroute_operation_finished.emit(False, f"RabiRoute 操作失败：{exc}", {"operation": operation})
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_rabiroute_operation_finished(self, ok: bool, message: str, data: dict) -> None:
+        self.route_refresh_button.setEnabled(True)
+        self.route_apply_binding_button.setEnabled(True)
+        self.route_status.setText(message)
+        self.append_log(message)
+        if not ok:
+            QMessageBox.warning(self, "RabiRoute", message)
+            return
+        operation = str(data.get("operation") or "")
+        if isinstance(data.get("identity"), dict):
+            self.rabiroute_identity_cache = data["identity"]
+        if operation == "refresh":
+            routes = data.get("routes")
+            self.rabiroute_routes_cache = routes if isinstance(routes, list) else []
+            selected_route = data.get("route") if isinstance(data.get("route"), dict) else {}
+            selected_id = RabiRouteSdk.route_id(selected_route)
+            self.route_rule_combo.blockSignals(True)
+            try:
+                self.route_rule_combo.clear()
+                self.route_rule_combo.addItem("未选择路由", "")
+                for route in self.rabiroute_routes_cache:
+                    self.route_rule_combo.addItem(RabiRouteSdk.route_display_name(route), RabiRouteSdk.route_id(route))
+                if selected_id:
+                    index = self.route_rule_combo.findData(selected_id)
+                    if index >= 0:
+                        self.route_rule_combo.setCurrentIndex(index)
+                else:
+                    self.route_rule_combo.setCurrentIndex(0)
+            finally:
+                self.route_rule_combo.blockSignals(False)
+            self.update_rabiroute_route_label(selected_route, str(data.get("matchReason") or ""))
+            self.apply_rabiroute_options(data.get("options") if isinstance(data.get("options"), dict) else {}, selected_route)
+        elif operation in {"options", "apply_binding"}:
+            route = self.selected_rabiroute_route(str(data.get("routeId") or ""))
+            self.update_rabiroute_route_label(route, "手动选择" if operation == "options" else "已切换")
+            self.apply_rabiroute_options(data.get("options") if isinstance(data.get("options"), dict) else {}, route)
+            if operation == "apply_binding":
+                config = self.collect_config()
+                write_config(CONFIG_PATH, config)
+                self.config_data = config
+        self.status_label.setText(message)
+
+    def apply_rabiroute_options(self, options: dict, fallback_route: dict) -> None:
+        route = options.get("route") if isinstance(options.get("route"), dict) else fallback_route
+        cwd_options = options.get("cwdOptions") if isinstance(options.get("cwdOptions"), list) else []
+        thread_names = options.get("threadNames") if isinstance(options.get("threadNames"), list) else []
+        current_cwd = str(route.get("codexCwd", "")) if isinstance(route, dict) else ""
+        current_thread = str(route.get("codexThreadName", "")) if isinstance(route, dict) else ""
+        self.set_editable_combo_values(self.route_cwd_combo, [str(item) for item in cwd_options], current_cwd)
+        self.set_editable_combo_values(self.route_thread_combo, [str(item) for item in thread_names], current_thread)
 
     def test_rabiroute_connection(self) -> None:
         config = self.collect_config()
@@ -3909,7 +4592,20 @@ class FenneNoteQt(QMainWindow):
         self.level_worker = None
         self.level_thread = None
 
-    def on_level(self, level: float, raw_level: float) -> None:
+    def active_level_source(self) -> str:
+        return "xiaoai" if self.external_text_mode() else "mic"
+
+    def level_source_label(self, source: str) -> str:
+        return "小爱麦克风电平" if source == "xiaoai" else "麦克风电平"
+
+    def level_preview_idle_text(self, source: str) -> str:
+        if source == "xiaoai":
+            return f"状态：小爱音量预览中；过录音线后静默唤醒小爱"
+        return f"状态：音量预览中；启动转写后按安静 {self.pause_seconds.value():.1f}s 切句"
+
+    def update_level_preview(self, level: float, raw_level: float, source: str | None = None) -> None:
+        source = source or self.active_level_source()
+        self.update_wave_source_mode(source)
         self.display_level = (self.display_level * 0.75) + (level * 0.25)
         self.display_raw_level = (self.display_raw_level * 0.75) + (raw_level * 0.25)
         threshold = self.current_preview_threshold()
@@ -3918,7 +4614,8 @@ class FenneNoteQt(QMainWindow):
             self.preview_noise_floor = (self.preview_noise_floor * 0.95) + (level * 0.05)
         self.level_history.append(self.display_level)
         peak = max(self.level_history, default=self.display_level)
-        self.level_text.setText(f"麦克风电平：原始 {self.display_raw_level:.3f} / 增益后 {self.display_level:.3f} / 录音阈值 {threshold:.3f} / 转写阈值 {transcribe:.3f} / 峰值 {peak:.3f}")
+        source_label = self.level_source_label(source)
+        self.level_text.setText(f"{source_label}：原始 {self.display_raw_level:.3f} / 增益后 {self.display_level:.3f} / 录音阈值 {threshold:.3f} / 转写阈值 {transcribe:.3f} / 峰值 {peak:.3f}")
         is_recording = self.display_level >= threshold or level >= threshold
         if self.transcriber_activity_state == "transcribing":
             self.trigger_state_label.setText("状态：正在转写，芬妮在记录")
@@ -3932,16 +4629,30 @@ class FenneNoteQt(QMainWindow):
             self.trigger_state_label.setText("状态：转写完成，继续监听")
         elif not self.transcriber_running() and is_recording:
             self.set_buddy_state("listening")
-            self.trigger_state_label.setText(
-                f"状态：音量预览中；启动转写后按安静 {self.pause_seconds.value():.1f}s 切句"
-            )
+            self.trigger_state_label.setText(self.level_preview_idle_text(source))
         elif not self.transcriber_running():
             self.set_buddy_state("idle")
             self.trigger_state_label.setText("状态：监听中，芬妮在待命")
         self.wave.push(self.display_level, threshold, transcribe)
         self.trigger_wave.push(self.display_level, threshold, transcribe)
 
+    def on_level(self, level: float, raw_level: float) -> None:
+        if self.external_text_mode():
+            return
+        self.update_level_preview(level, raw_level, "mic")
+
+    def handle_xiaoai_level(self, level: float, raw_level: float) -> None:
+        if not self.external_text_mode():
+            return
+        self.update_level_preview(level, raw_level, "xiaoai")
+
     def toggle_transcriber(self) -> None:
+        if self.external_text_mode():
+            if self.external_text_active:
+                self.stop_transcriber()
+            else:
+                self.start_transcriber()
+            return
         if self.transcriber_running():
             self.stop_transcriber()
         else:
@@ -3950,14 +4661,31 @@ class FenneNoteQt(QMainWindow):
     def start_transcriber(self) -> None:
         config = self.collect_config()
         write_config(CONFIG_PATH, config)
+        if config.get("model_source") == "external_text":
+            self.config_data = config
+            self.running_config = config.copy()
+            self.external_text_active = True
+            self.restart_playback_api_server()
+            port = int(config.get("playback_api_port", DEFAULT_CONFIG["playback_api_port"]))
+            message = f"外部文字入口已启用：http://127.0.0.1:{port}/api/fennenote/xiaoai"
+            self.status_label.setText(message)
+            self.trigger_state_label.setText("状态：等待小爱/云函数文字输入")
+            self.append_log(message)
+            self.transcriber_activity_state = "listening"
+            self.set_buddy_state("listening")
+            self.update_start_button_state()
+            return
         if config.get("model_source") == "api":
             provider = str(config.get("api_provider", config.get("api_provider_id", ""))).strip().lower()
             missing = []
-            if provider != "dashscope":
-                missing.append("Provider 请选择 千问 / DashScope")
+            if provider not in {"dashscope", "mimo"}:
+                missing.append("Provider 请选择 千问 / DashScope 或 小米 MiMo")
             if not str(config.get("api_model", "")).strip():
                 missing.append("模型")
-            if not str(config.get("api_key", "")).strip():
+            if provider == "mimo":
+                if not os.environ.get("MIMO_API_KEY", "").strip():
+                    missing.append("环境变量 MIMO_API_KEY")
+            elif not str(config.get("api_key", "")).strip():
                 missing.append("API Key")
             if missing:
                 QMessageBox.warning(self, "API 模型", "还不能启动：" + "、".join(missing))
@@ -3998,6 +4726,18 @@ class FenneNoteQt(QMainWindow):
             self.process_worker.send(command)
 
     def stop_transcriber(self) -> None:
+        if self.external_text_active:
+            self.external_text_active = False
+            self.running_config = None
+            self.transcriber_activity_state = "idle"
+            bridge_stop_message = self.stop_xiaoai_bridge_runtime()
+            self.status_label.setText("外部文字入口已停止等待")
+            self.trigger_state_label.setText("状态：监听中，芬妮在待命")
+            self.append_log("外部文字入口已停止等待")
+            self.append_log(bridge_stop_message)
+            self.set_buddy_state("idle")
+            self.update_start_button_state()
+            return
         if self.process_worker:
             self.status_label.setText("正在停止")
             self.append_log("正在停止转写进程")
@@ -4046,7 +4786,10 @@ class FenneNoteQt(QMainWindow):
                     self.trigger_state_label.setText("状态：已暂停监听")
             return
         if line.startswith("["):
-            self.transcript.appendPlainText(self.format_transcript_preview_line(line))
+            self.append_transcript_preview_item({
+                "kind": "legacy",
+                "text": self.format_transcript_preview_line(line),
+            })
         elif line:
             self.status_label.setText(line[:100])
             self.append_log(line)
@@ -4079,15 +4822,54 @@ class FenneNoteQt(QMainWindow):
                         speaker_text = speaker_chunk
         return f"{timestamp} 发言人是：{speaker_text}{confidence_text}  {rest}".rstrip()
 
-    def speaker_preview_label(self, speaker: dict | None) -> str:
+    def speaker_display_name(self, speaker: dict | None) -> str:
         if not isinstance(speaker, dict):
             return "未识别"
-        name = str(speaker.get("speaker_name") or speaker.get("speaker_id") or "未识别").strip() or "未识别"
+        speaker_id = str(speaker.get("speaker_id") or speaker.get("id") or "").strip()
+        if speaker_id:
+            profile = self.profile_for_speaker_id(speaker_id)
+            if profile:
+                display_name = str(profile.get("display_name") or "").strip()
+                if display_name:
+                    return display_name
+        return str(speaker.get("speaker_name") or speaker_id or "未识别").strip() or "未识别"
+
+    def speaker_preview_label(self, speaker: dict | None) -> str:
+        name = self.speaker_display_name(speaker)
         confidence = speaker.get("speaker_confidence")
         try:
             return f"{name}（{float(confidence):.2f}）"
         except (TypeError, ValueError):
             return name
+
+    def transcript_preview_line(self, item: dict) -> str:
+        kind = str(item.get("kind") or "transcript")
+        if kind == "legacy":
+            return str(item.get("text") or "")
+        if kind == "rabiroute_reply":
+            timestamp = str(item.get("time") or datetime.now().strftime("%H:%M:%S"))
+            name = str(item.get("name") or "RabiRoute").strip() or "RabiRoute"
+            text = str(item.get("text") or "").strip()
+            return f"[{timestamp}] {name}：{text}".rstrip()
+        timestamp = str(item.get("time") or datetime.now().strftime("%H:%M:%S"))
+        time_range = str(item.get("time_range") or "").strip()
+        speaker = self.speaker_preview_label(item.get("speaker"))
+        text = str(item.get("text") or "").strip()
+        head = f"[{timestamp} {time_range}]" if time_range else f"[{timestamp}]"
+        return f"{head} 发言人是：{speaker}  {text}".rstrip()
+
+    def append_transcript_preview_item(self, item: dict) -> None:
+        self.transcript_preview_items.append(item)
+        self.transcript.appendPlainText(self.transcript_preview_line(item))
+
+    def refresh_transcript_preview(self) -> None:
+        if not hasattr(self, "transcript"):
+            return
+        self.transcript.clear()
+        for item in self.transcript_preview_items:
+            line = self.transcript_preview_line(item)
+            if line:
+                self.transcript.appendPlainText(line)
 
     def append_transcript_preview(self, payload: dict) -> None:
         timestamp = str(payload.get("time") or "")
@@ -4099,16 +4881,26 @@ class FenneNoteQt(QMainWindow):
             for turn in turns:
                 if not isinstance(turn, dict):
                     continue
-                speaker = self.speaker_preview_label(turn)
                 text = str(turn.get("text") or "").strip()
                 start = float(turn.get("start", 0.0) or 0.0)
                 end = float(turn.get("end", 0.0) or 0.0)
                 time_range = f"+{start:.1f}-{end:.1f}s"
-                self.transcript.appendPlainText(f"[{timestamp} {time_range}] 发言人是：{speaker}  {text}".rstrip())
+                self.append_transcript_preview_item({
+                    "kind": "transcript",
+                    "time": timestamp,
+                    "time_range": time_range,
+                    "speaker": turn.copy(),
+                    "text": text,
+                })
             return
-        speaker = self.speaker_preview_label(payload.get("speaker"))
         text = str(payload.get("text") or "").strip()
-        self.transcript.appendPlainText(f"[{timestamp}] 发言人是：{speaker}  {text}".rstrip())
+        speaker = payload.get("speaker") if isinstance(payload.get("speaker"), dict) else {}
+        self.append_transcript_preview_item({
+            "kind": "transcript",
+            "time": timestamp,
+            "speaker": speaker.copy() if isinstance(speaker, dict) else {},
+            "text": text,
+        })
 
     def on_process_exited(self, _code: int) -> None:
         self.pause_button.setEnabled(False)
@@ -4116,6 +4908,7 @@ class FenneNoteQt(QMainWindow):
         self.status_label.setText("已停止")
         self.append_log("转写进程已停止")
         self.running_config = None
+        self.external_text_active = False
         self.transcriber_activity_state = "idle"
         self.set_buddy_state("idle")
         if self.process_thread:

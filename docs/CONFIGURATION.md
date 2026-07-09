@@ -33,6 +33,12 @@ FenneNote 的配置文件是程序所在目录下的 `config.json`。如果文�
 - `混合麦克风和电脑声音用于转写`：开启后，FenneNote 会把麦克风和另一个“电脑播放声输入”混合成一段音频，再送去转写。
 - `电脑声音输入`：选择能代表电脑播放声的输入设备，例如 `立体声混音`、虚拟声卡 Input、Steam/网易/AudioRelay 的回放输入。当前版本不创建 Windows 系统级虚拟麦克风。
 - `电脑声音增益`：电脑播放声混入转写前的音量倍数，默认 `1.0`。
+- `输入源类型`：可选 `麦克风录音` 或 `外部文字输入`。外部文字输入用于小爱音箱/云函数已经识别好的文本，不启动本地 ASR，也不显示麦克风、混音和识别模型参数。
+- `小爱桥接入口`：输入源类型为 `外部文字输入` 时显示。Open-XiaoAI / MiGPT / 小爱云函数一类上游可以先 POST 到 `http://127.0.0.1:8799/v1/xiaoai/decision`，再由桥接服务转给 FenneNote。
+- `局域网填写地址`：给音箱、容器外服务或同局域网设备填写的地址，例如 `http://192.168.x.x:8799/v1/xiaoai/decision`。本机测试用 `127.0.0.1`，小爱侧不要填 `127.0.0.1`。
+- `桥接配置`：可一键把本地 RabiRoute/Open-XiaoAI 示例配置从旧的 `8798` 改到 FenneNote 桥 `8799`，并自动重启本地 Open-XiaoAI / MiGPT 进程。若使用 Docker 容器，仍可能需要重启容器。
+- `小爱入口` / `通用入口`：FenneNote 自己的接收端。已经能直接访问 FenneNote 的上游服务，也可以跳过桥接，直接 POST 到这里。
+- `识别模型来源`：麦克风录音模式下可选本地模型或 API 模型。
 - `模型`：默认 `small`。质量不够可试 `medium`，但显存和延迟会增加。
 - `运行设备`：固定 `GPU / CUDA`。
 - `计算精度`：默认 `int8_float16`。
@@ -113,6 +119,10 @@ RabiRoute 扩展页：
 - `推送 URL`：默认 `http://127.0.0.1:8791/webhook`。
 - `来源 ID`：默认 `fennenote`。
 - `访问令牌`：可选。填写后会用 `Authorization: Bearer <token>` 发送。
+- `Manager URL`：RabiRoute manager 的 RabiAPI 地址，默认 `http://127.0.0.1:8790`。FenneNote 会通过独立的 `rabiroute_sdk.py` 读取实例身份、路由列表和 Agent 可选项。
+- `当前路由` / `路由规则名`：刷新后会按 `推送 URL` 的端口和路径自动匹配对应 RabiRoute 路由；匹配不到时也可以手动选择路由。
+- `Codex 工作目录` / `Codex 会话线程`：来自 RabiRoute 的 Agent options。留空分别表示使用 RabiRoute 根目录、按路由名自动创建或选择会话。
+- `切换 Codex 目录/线程`：调用 RabiAPI 写回当前路由的 Agent 绑定，只修改 RabiRoute 的 route 配置，不影响 FenneNote 自己的转写配置。
 
 公司环境部署时，`推送 URL` 和 `访问令牌` 在部署机器本地填写。公开仓库不要写入真实内网地址、公网域名或任何密钥。
 
@@ -126,11 +136,53 @@ FenneNote 默认面向简体中文普通话办公场景。推荐提示词保留�
 
 日语识别可能不稳定，尤其是中文、英文技术词和日语混合输入。需要日语时建议建立单独本地配置做测试，不要把未验证的日语提示词作为公开默认值。
 
+## MiMo ASR 评估入口
+
+如果要评估 Xiaomi MiMo ASR，在“识别模型来源”选择 `API 模型`，Provider 选择 `小米 MiMo`，模型使用 `mimo-v2.5-asr`。MiMo 密钥不要写入 `config.json`；FenneNote 只读取环境变量：
+
+```powershell
+$env:MIMO_API_KEY = "<set-locally>"
+$env:MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
+```
+
+`MIMO_BASE_URL` 可省略，默认就是 `https://api.xiaomimimo.com/v1`。当前 MiMo 路线只接普通 ASR 文本；说话人分离仍沿用现有 DashScope diarization 路线。
+
+当前专名误识别优先通过转写后处理修正，默认配置会把 `森之灵`、`森之名`、`升之零`、`生之零`、`孙智宁` 统一替换为规范词 `森之宁`。如需关闭，可在本机配置里设置：
+
+```json
+{
+  "transcript_corrections_enabled": false
+}
+```
+
 ## QQ 与语音边界
 
 FenneNote 代表电脑旁麦克风输入，可以把 `voice_transcript` 交给 RabiRoute、Codex/Agent，再由 OumuQ 或 TTS worker 生成角色语音回声。
 
 QQ、微信群聊或机器人平台消息默认应只按文字处理，不自动发语音。只有明确来自 FenneNote 的 `voice_transcript`，才建议恢复 Codex 侧语音输出。
+
+外部文字入口可用于小爱音箱、云函数或其他上游已经完成语音识别的服务：
+
+```text
+POST http://127.0.0.1:8799/v1/xiaoai/decision
+POST http://127.0.0.1:8793/api/fennenote/transcript
+POST http://127.0.0.1:8793/api/fennenote/xiaoai
+```
+
+请求体示例：
+
+```json
+{
+  "text": "问 Rabi 今天电脑任务跑完了吗",
+  "source": "xiaoai",
+  "deviceName": "卧室小爱",
+  "sessionId": "xiaoai-session-001"
+}
+```
+
+FenneNote 收到后会写入转写记录和转写预览，并按当前 RabiRoute 配置继续推送。因为这个入口没有原始音频，所以不会做声纹识别、说话人分离或音频级 TTS 防回流判断。
+
+小爱 `/v1/xiaoai/decision` 是单目标决策入口，不建议配置多个 IP 同时广播。原因是这个接口会返回 `ignore` 或 `intercept`，多目标会导致重复写入、重复触发，以及不同目标返回互相冲突的拦截决策。需要旁路记录时，应让主桥接服务收到一次后再复制日志事件，而不是让小爱侧多播。
 
 ## QQ 混音虚拟麦克风
 
