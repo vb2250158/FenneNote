@@ -35,7 +35,7 @@ CUDA_DLL_DIRS = [
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 
 DEFAULT_CONFIG = {
     "config_version": CONFIG_VERSION,
@@ -96,16 +96,7 @@ DEFAULT_CONFIG = {
     "speaker_auto_enroll_enabled": True,
     "speaker_unknown_prefix": "unknown",
     "speaker_match_threshold": 0.92,
-    "speaker_diarization_upload_url": "http://127.0.0.1:8780/api/audio/upload-public",
-    "speaker_diarization_model": "paraformer-v2",
-    "speaker_diarization_speaker_count": 0,
     "model_source": "local",
-    "api_provider": "dashscope",
-    "api_provider_id": "dashscope",
-    "api_provider_enabled": False,
-    "api_model": "qwen3-asr-flash",
-    "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "api_key": "",
     "transcript_corrections_enabled": True,
     "transcript_corrections": {
         "森之灵": "森之宁",
@@ -1508,6 +1499,8 @@ def transcribe_loop(config: dict) -> None:
     output_dir = app_path(str(config["output_dir"])).resolve()
     model_source = str(config.get("model_source", "local") or "local").lower()
     if model_source == "api":
+        raise RuntimeError("API ASR 已归档；FenneNote 仅允许本地 faster-whisper。")
+    if False:  # Frozen historical snapshot only; indexed by archive/cloud-api-20260717/README.md.
         api_provider = str(config.get("api_provider", config.get("api_provider_id", "")) or "").lower()
         if api_provider not in {"dashscope", "千问 / dashscope", "mimo", "xiaomi_mimo", "xiaomi mimo"}:
             raise RuntimeError(f"Unsupported API provider: {api_provider or '(empty)'}. DashScope and MiMo are currently supported.")

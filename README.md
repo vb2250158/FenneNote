@@ -1,5 +1,8 @@
 # FenneNote
 
+> [!IMPORTANT]
+> **本项目已于 2026-07-17 结束维护，仅保留为历史归档。** 麦克风常驻监听、RMS 声音阈值、静音切段、本地 ASR、模型查询和可选 Route 提交已经迁移到 RabiRoute 的 RabiPC「语音消息端」与 RabiSpeech。当前机器不得再以 FenneNote 作为常驻转写入口。请使用 RabiRoute Manager `http://127.0.0.1:8790`；底层本地语音 API 为 `http://127.0.0.1:8781`。
+
 <p align="center">
   <img src="assets/fennenote-readme-banner.png" alt="FenneNote README banner" />
 </p>

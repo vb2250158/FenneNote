@@ -138,7 +138,7 @@ LANGUAGE_LABELS = {
 LANGUAGE_CODES = {label: code for code, label in LANGUAGE_LABELS.items()}
 INPUT_SOURCE_TYPE_LABELS = {"mic": "麦克风录音", "external_text": "外部文字输入"}
 INPUT_SOURCE_TYPE_CODES = {label: code for code, label in INPUT_SOURCE_TYPE_LABELS.items()}
-MODEL_SOURCE_LABELS = {"local": "本地模型", "api": "API 模型"}
+MODEL_SOURCE_LABELS = {"local": "本地模型"}
 MODEL_SOURCE_CODES = {label: code for code, label in MODEL_SOURCE_LABELS.items()}
 AUDIO_ROUTE_PRESET_LABELS = {
     "solo_voice_input": "Solo voice input - FenneNote listens to physical mic",
@@ -1648,7 +1648,8 @@ class FenneNoteQt(QMainWindow):
 
     def build_model_page(self) -> None:
         _, _, layout = self.page()
-        provider = QGroupBox("API Provider 配置")
+        provider = QGroupBox("API Provider（已归档）")
+        provider.setVisible(False)
         form = QFormLayout(provider)
         self.api_enabled_check = ToggleSwitch("启用 API Provider")
         self.api_provider_id = QLineEdit()
@@ -3892,7 +3893,7 @@ class FenneNoteQt(QMainWindow):
         config = DEFAULT_CONFIG.copy()
         config.update(load_config(CONFIG_PATH))
         model_name = self.local_model_combo.currentData() or config.get("model", DEFAULT_CONFIG["model"])
-        model_source = "external_text" if self.external_text_mode() else MODEL_SOURCE_CODES.get(self.source_combo.currentText(), "local")
+        model_source = "external_text" if self.external_text_mode() else "local"
         record = self.record_threshold.value()
         config.update(
             {
@@ -3900,12 +3901,6 @@ class FenneNoteQt(QMainWindow):
                 "output_dir": self.output_dir_edit.text().strip() or DEFAULT_CONFIG["output_dir"],
                 "cache_dir": self.cache_dir_edit.text().strip() or DEFAULT_CONFIG["cache_dir"],
                 "model_source": model_source,
-                "api_provider": API_PROVIDER_CODES.get(self.api_provider_combo.currentText(), "dashscope"),
-                "api_provider_id": self.api_provider_id.text().strip() or API_PROVIDER_CODES.get(self.api_provider_combo.currentText(), "dashscope"),
-                "api_provider_enabled": self.api_enabled_check.isChecked(),
-                "api_model": self.selected_api_model_id(),
-                "api_base_url": self.api_base_url.text().strip(),
-                "api_key": self.api_key.text().strip(),
                 "auto_start": self.auto_start_check.isChecked(),
                 "device": "cuda",
                 "compute_type": self.compute_combo.currentText(),
@@ -3949,7 +3944,7 @@ class FenneNoteQt(QMainWindow):
                 "speaker_registry_file": self.speaker_registry_file.text().strip() or DEFAULT_CONFIG["speaker_registry_file"],
                 "speaker_recognition_enabled": self.speaker_recognition_enabled.isChecked(),
                 "speaker_auto_enroll_enabled": self.speaker_auto_enroll_enabled.isChecked(),
-                "speaker_subtitle_enabled": self.speaker_subtitle_enabled.isChecked(),
+                "speaker_subtitle_enabled": False,
                 "speaker_match_threshold": round(float(self.speaker_match_threshold.value()), 2),
                 "rabiroute_enabled": self.route_enabled.isChecked(),
                 "rabiroute_url": self.route_url.text().strip(),
@@ -3959,6 +3954,9 @@ class FenneNoteQt(QMainWindow):
                 "rabiroute_route_id": str(self.route_rule_combo.currentData() or ""),
             }
         )
+        for key in list(config):
+            if key.startswith("api_") or key.startswith("speaker_diarization_"):
+                config.pop(key, None)
         return config
 
     def save_config(self) -> None:
